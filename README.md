@@ -76,12 +76,12 @@ optimizer = AgentOptimizer(agent=ClaudeCodeAgent(), parameters=module.parameters
 
 module.train()
 for epoch in range(5):
-    for batch in train_loader:
-        data = module(batch)
-        loss(data, batch)
-    loss.backward()       # structured feedback fills param.grad
-    optimizer.step()      # optimizer applies improvements (e.g. edits code)
-    optimizer.zero_grad()
+  for batch in train_loader:
+    data = module(batch)
+    loss(data, batch)
+  loss.backward()       # structured feedback fills param.grad
+  optimizer.step()      # optimizer applies improvements (e.g. edits code)
+  optimizer.zero_grad()
 ```
 
 **Automated loop (Lightning-style)** -- define steps, let Trainer handle the rest:
@@ -91,11 +91,11 @@ from autopilot.core.module import AutoPilotModule
 from autopilot.core.trainer import Trainer
 
 class MyModule(AutoPilotModule):
-    def training_step(self, batch):
-        return self.forward(batch)
+  def training_step(self, batch):
+    return self.forward(batch)
 
-    def configure_optimizers(self):
-        return AgentOptimizer(agent=ClaudeCodeAgent(), parameters=self.parameters())
+  def configure_optimizers(self):
+    return AgentOptimizer(agent=ClaudeCodeAgent(), parameters=self.parameters())
 
 trainer = Trainer(callbacks=[...], policy=my_policy, store=my_store)
 trainer.fit(module, train_dataloaders=loader, max_epochs=10)
