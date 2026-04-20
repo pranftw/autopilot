@@ -1,56 +1,62 @@
 # AutoPilot
 
-What if you could train an AI agent the same way you train a neural network?
+What if you could optimize any software system the same way you train a neural network?
 
-AutoPilot is a PyTorch/Lightning-inspired framework for agent optimization. Text feedback replaces numerical gradients. Code edits replace weight updates. The same `forward -> loss -> backward -> optimizer.step()` loop that trains neural networks now trains AI agents -- deterministically, with memory, rollback, and policy gating.
+AutoPilot is a PyTorch/Lightning-inspired framework for **generalized optimization**. It brings the rigor and developer experience of deep learning to non-differentiable systems. Structured feedback replaces numerical gradients. State mutations (like code edits or config updates) replace weight updates. The same `forward -> loss -> backward -> optimizer.step()` loop that trains neural networks now optimizes prompts, heuristics, rule engines, agents, and configurations—deterministically, with memory, rollback, and policy gating.
 
 ## The problem
 
-Building agents today is manual. You tweak a prompt, run the agent, look at the output, decide if it got better, and repeat. There is no structured feedback loop. There is no memory of what was already tried. There is no automatic rollback when a change makes things worse.
+Building complex, non-differentiable systems—like AI agents, RAG pipelines, fraud detection heuristics, or rule-based engines—is a manual, informal process today. You tweak a prompt or a regex rule, run the system, look at the output, decide if it got better, and repeat. 
 
-This affects everyone building agents, from solo developers to large teams. You make a change and run it. If it looks worse, you undo it by hand. If you are not sure, you guess. After a few dozen iterations you have lost track of what you tried at iteration five. Someone else on the team tries the same thing again next week.
+This process lacks the structured feedback loop that made deep learning iteration so fast:
+- **No Memory**: There is no automatic log of what was already tried. You often re-try the same failed strategy multiple times.
+- **No Structured Feedback**: Evaluation is often "looks right to me." There is no quantitative tracking of metrics across held-out validation sets.
+- **No Automatic Rollback**: When a change makes things worse, you undo it by hand. If you're not sure, you guess.
+- **No Scalability**: One person manually iterating is slow. There is no way to run this overnight, no way to hand it to an autonomous system, and no way to reproduce what happened three experiments ago.
 
-Evaluation is informal. "Looks right to me" is the bar. There is no held-out validation set, no quantitative metric tracking, no policy that blocks a bad change from shipping. The agent either seems to work or it doesn't, and the criteria live in someone's head.
+AutoPilot solves this by formalizing the iteration loop into the same structural abstractions that powered the deep learning revolution.
 
-Scaling this is not possible. One person manually iterating can improve an agent slowly. But there is no way to run this overnight, no way to hand it to an autonomous system, no way to reproduce what happened three experiments ago.
+## The core idea: PyTorch for everything else
 
-Karpathy's [autoresearch](https://github.com/karpathy/autoresearch) proved the loop works. Give an agent code, let it modify and evaluate, keep improvements, discard regressions, repeat. It ran 100 experiments overnight on a single file. But the entire orchestration lives in a markdown prompt. When to keep, when to discard, how to log results, when to revert are all natural language instructions the agent has to interpret correctly every time.
+Optimizing any iterative system follows the same structure as training a neural network. AutoPilot formalizes this mapping into a real, typed interface.
 
-## The core idea
+In deep learning, you pass data through a model (**forward pass**). A loss function scores the output. Backpropagation computes **gradients** that explain how parameters should change. An **optimizer** reads those gradients and updates the **weights**. You repeat this in epochs, validate on held-out data, and checkpoint good states.
 
-Optimizing an agent follows the same structure as training a neural network. Not loosely, not as a borrowed analogy. The workflow maps one-to-one if you formalize what each step actually does.
+AutoPilot applies this exact structure to general software optimization:
+- **Module** is your system (agent, rule engine, pipeline), exactly like `nn.Module`.
+- **Loss** wraps an evaluator (Judge, profiler, or test suite) that produces structured feedback (**gradients**).
+- **Parameters** mark what can be edited (prompts, JSON configs, source files via `PathParameter`).
+- **Optimizer** applies changes based on gradients—this can be an AI coding agent or a deterministic algorithm.
+- **Backward** propagates structured feedback through the computation graph.
+- **Step** triggers the update to the underlying parameters.
 
-In ML, data flows through a model (forward pass). A loss function scores the output. Backpropagation computes gradients that explain how each parameter should change. An optimizer reads those gradients and updates the weights. You repeat this in epochs, validate on held-out data, checkpoint good states, and stop when quality plateaus.
+The difference is in what flows through the loop. Gradients can be text, JSON, or any arbitrary Python object. Weight updates can be code edits, file rewrites, or config tweaks. But the structure, the separation of concerns, and the lifecycle are identical to the PyTorch experience you already know.
 
-Agent optimization has the same shape. Eval cases flow through the agent (forward pass). A Judge scores each output and produces structured feedback explaining what went wrong (text gradients). A coding agent reads those gradients and edits the source files (optimizer step). You repeat in epochs, validate on a held-out split, snapshot the code, and roll back if quality drops.
+## What you can optimize
 
-The difference is in what flows through the loop. Gradients are text instead of numbers. Weight updates are code edits instead of tensor arithmetic. The optimizer is a coding agent instead of Adam. But the structure, the flow of information, the separation of concerns, and the lifecycle are identical.
+AutoPilot is built for extreme extensibility. As long as you can define a forward pass and a way to score the result, you can optimize it:
 
-AutoPilot formalizes this mapping into a real typed interface. `Module` is your agent, with `forward(batch)` and auto-registered child modules and parameters, exactly like `nn.Module`. `Loss` wraps a Judge as a loss function. `Parameter` and `PathParameter` mark what the optimizer can edit. `Optimizer.step()` triggers a coding agent that reads `param.grad` and modifies code. `Metric` tracks quantitative progress with `update()` and `compute()`, composable via `+`. `Store` is content-addressed code versioning with snapshot, checkout, diff, branch, and merge. `Policy` with `Gate` hierarchies is your early stopping. `Callback` hooks into every point in the loop. `DataLoader` batches eval items from `Dataset` and `DataModule`.
+- **Prompt & AI Pipelines**: Tune system prompts, RAG chunking parameters, or multi-agent routing logic based on LLM-judged evaluations.
+- **Heuristic & Rule Engines**: Evolve fraud detection thresholds, spam filters, or trading algorithms where loss is based on precision/recall metrics.
+- **Configuration Tuning**: Optimize database settings, cache eviction policies, or compiler flags using performance profiling reports as structured gradients.
+- **Simulation & Game Balancing**: Adjust unit stats, physics parameters, or generation seeds based on win-rate or equilibrium metrics.
+- **Code Performance**: Refactor SQL queries or tight loops using `EXPLAIN ANALYZE` plans and profiler outputs as structured feedback for a coding optimizer.
 
-Every ML workflow concept has a concrete counterpart in AutoPilot. Epochs are real epoch boundaries enforced by the loop. Batches are real batched iteration over eval datasets. Train/val/test splits are real held-out data that catches overfitting. Checkpointing is real content-addressed snapshots. Early stopping is a real policy gate that triggers rollback. These are not borrowed terms. They describe real structural equivalents that behave the same way and benefit from the same infrastructure.
+## The ML analogy
 
-This means everything ML practitioners already know about training loops transfers directly. You think in epochs. You worry about overfitting to your train set. You validate on held-out data. You checkpoint and rollback. You track metrics across runs. The vocabulary is the same because the structure is the same.
+AutoPilot isn't just a borrowed analogy; it's a structural equivalent that transfers everything ML practitioners know about training loops directly to software engineering:
 
-## What this gives you
-
-- **A uniform, typed interface.** Every component is a Python object with a known protocol. Module, Loss, Optimizer, Metric, Policy, Store, Memory, Callback. You compose them the same way you compose PyTorch components. No string registries, no YAML configs, no magic wiring. Instantiate objects, pass them in, call methods.
-
-- **The full ML toolkit applied to agent optimization.** Train/val/test splits prevent overfitting. Metrics track progress quantitatively across epochs. Policy gates with MinGate, MaxGate, RangeGate, and CustomGate enforce quality bars. Store checkpoints enable rollback to any previous epoch. Memory tracks what was tried, what worked, and which strategies are blocked.
-
-- **Structured feedback, not opaque scores.** A Judge does not just produce a number. `JudgeLoss` accumulates structured feedback per batch, and `backward()` fills `param.grad` with text that explains what went wrong and why. The optimizer reads these text gradients to make targeted fixes. This is `loss.backward()` for agents.
-
-- **Real code versioning.** `FileStore` uses SHA-256 content addressing, snapshot manifests, and atomic writes. `store.checkout(epoch)` restores code to any previous state. Diff shows what changed between epochs. Branch and merge support parallel experimentation. `StoreCheckpoint` and `StorePromoter` callbacks automate snapshotting and promotion.
-
-- **Memory that persists across epochs.** `FileMemory` records what was tried, whether it improved metrics, and which strategies caused regressions. `MemoryCallback` captures this automatically. The optimizer's strategy blocklist prevents re-trying failed approaches. No ML framework needs this because weight-space optimization is stateless across steps. Agent optimization is not.
-
-- **Deterministic orchestration.** The loop runs the same way every time. `EpochOrchestrator` handles plateau detection, regression rollback, and stop conditions. `RegressionCallback` compares validation metrics to the best baseline and flags regressions. `RunStateCallback` tracks run state for crash detection. Epoch boundaries, evaluation, gating, and rollback are all code.
-
-- **Composability across use cases.** The textmatch example optimizes regex rules with a deterministic `RuleOptimizer` and zero LLM calls. The protim example optimizes a prompt file with `AgentOptimizer` and Claude Code. Same Module, same Loss interface, same Trainer, same Store, different optimizers. You can optimize prompts, code, configs, pipelines, or anything else that can be evaluated and improved through text feedback.
-
-- **Two layers of control.** Write the loop yourself with explicit `loss.backward()` and `optimizer.step()` calls for full control (PyTorch-style). Or define `training_step` and `configure_optimizers` on an `AutoPilotModule` and let `Trainer.fit()` handle the rest (Lightning-style). Same components, same protocols, different levels of automation.
-
-- **Production infrastructure included.** `CostTracker` measures wall-clock time per epoch. `DiagnoseCallback` produces trace diagnostics and node heatmaps. Proposal and verdict tracking manages hypotheses across experiments. A full CLI covers every operation: `optimize loop` for automated training, `store` for version control, `memory` for inspection, `diagnose` and `trace` for debugging, `experiment` and `project` for lifecycle management. The `--expose` flag produces a JSON audit trail of every command.
+| ML workflow | AutoPilot workflow |
+| --- | --- |
+| Training data | Eval dataset (test cases with ground truth) |
+| Forward pass (`model(x)`) | Run the system on eval items (`module(batch)`) |
+| Loss computation | Evaluator scores outputs, accumulates structured feedback |
+| Backward (`loss.backward()`) | Feedback flows back to fill `param.grad` with "gradients" |
+| Optimizer step (`optimizer.step()`) | Optimizer reads gradients and applies state mutations |
+| Validation | Run on held-out split to check for regressions |
+| Epoch | One full cycle: run all items -> judge -> gradient -> update -> redeploy |
+| Overfitting | System tuned for train set quirks, failing on val/test |
+| Checkpoint | Store snapshots code/config at each epoch, enabling rollback |
 
 ## Two layers: PyTorch core + Lightning automation
 
@@ -73,8 +79,8 @@ for epoch in range(5):
     for batch in train_loader:
         data = module(batch)
         loss(data, batch)
-    loss.backward()       # text gradients fill param.grad
-    optimizer.step()      # coding agent applies improvements
+    loss.backward()       # structured feedback fills param.grad
+    optimizer.step()      # optimizer applies improvements (e.g. edits code)
     optimizer.zero_grad()
 ```
 
@@ -95,26 +101,6 @@ trainer = Trainer(callbacks=[...], policy=my_policy, store=my_store)
 trainer.fit(module, train_dataloaders=loader, max_epochs=10)
 ```
 
-## The ML analogy
-
-In ML, you train a model by passing data through it, computing a loss, backpropagating gradients, and updating weights. AutoPilot applies the same structure to agent optimization -- text feedback replaces numerical gradients, code edits replace weight updates:
-
-| ML workflow | AutoPilot workflow |
-| --- | --- |
-| Training data (MNIST images) | Eval dataset (test cases with ground truth) |
-| Forward pass (`model(x)`) | Run the agent on eval items (`module(batch)`) |
-| Loss computation (`criterion(output, target)`) | Judge scores outputs, accumulates structured feedback |
-| Backward (`loss.backward()` fills `param.grad`) | Judge feedback becomes text gradients on parameters |
-| Optimizer step (`optimizer.step()` updates weights) | Coding agent reads gradients, edits source files |
-| Validation (check generalization) | Run on val split, check for regressions |
-| Epoch | Full cycle: run all items -> judge -> gradient -> code edit -> redeploy |
-| Overfitting | Agent tuned for train set quirks, failing on val/test |
-| Early stopping | Policy gate fails -> stop and rollback |
-| Checkpoint | Store snapshots code at each epoch, enables rollback |
-| Learning rate | How aggressive: prompt tweak vs full architectural restructure |
-
-The key insight: `Datum` is to AutoPilot what `Tensor` is to PyTorch -- the universal data object that flows through the entire loop. Input, output, loss, gradients are all structured around `Datum`.
-
 ## Component mapping
 
 | PyTorch / Lightning | AutoPilot |
@@ -125,24 +111,19 @@ The key insight: `Datum` is to AutoPilot what `Tensor` is to PyTorch -- the univ
 | `nn.CrossEntropyLoss` | `Loss` / `JudgeLoss` |
 | `optim.Adam` | `Optimizer` / `AgentOptimizer` |
 | `nn.Parameter` | `Parameter` / `PathParameter` |
-| `Tensor` | `Datum` |
+| `Tensor` | `Datum` / `Gradient` (can be any object) |
 | `torchmetrics.Metric` | `Metric` |
 | `EarlyStopping` | `Policy` + `Gate` |
 | `ModelCheckpoint` | `Store` + `StoreCheckpoint` |
-| Autograd engine | `Graph` / `Node` |
+| Autograd engine | `Graph` / `Node` (propagates arbitrary objects) |
 | `Dataset` / `DataLoader` | `ListDataset` / `DataLoader` |
-| Lightning `Callback` | `Callback` |
-| Lightning `FitLoop` | `Loop` / `EpochLoop` |
-| No equivalent | `Memory` (persistent cross-epoch learning) |
-| No equivalent | `DataGenerator` (structured dataset creation) |
-| No equivalent | `Judge` (structured output scoring) |
 
 ## Examples
 
 See [examples/](examples/) for runnable, self-contained projects:
 
-- **[textmatch](examples/textmatch/)** -- regex-rule optimization with Module, Loss, Optimizer, Trainer, Policy, Store. No LLM required.
-- **[protim](examples/protim/)** -- agent-optimized prompt with ClaudeCodeAgent for both inference and code editing. Requires `claude` CLI.
+- **[textmatch](examples/textmatch/)** -- **Deterministic Rule Optimization.** Optimizes regex rules using a deterministic `RuleOptimizer` and zero LLM calls. Shows the power of the framework without AI.
+- **[protim](examples/protim/)** -- **Agent-Driven Prompt Optimization.** Optimizes a prompt file using `AgentOptimizer` and Claude Code.
 
 Each example is its own uv package. Clone, `cd examples/<name>`, `uv sync`, `uv run python run.py`.
 
@@ -152,24 +133,14 @@ Each example is its own uv package. Clone, `cd examples/<name>`, `uv sync`, `uv 
 uv sync && uv run autopilot --help
 ```
 
-Install the `autopilot` package, then use the `autopilot` CLI from the project root.
+## Key features
 
-## Key commands
-
-| Command | Role |
-| --- | --- |
-| `optimize` | Drive the optimization loop |
-| `ai` | Dataset generation and judging |
-| `experiment` | Create, list, and manage experiment slugs and manifests |
-| `project` | Create, list, and check project health |
-| `workspace` | Init layout, health checks, tree under `autopilot/` |
-| `dataset` | Registry, splits, validation |
-| `policy` | Policies, scoring, and gate inspection |
-| `store` | Content-addressed code versioning |
-| `report` | Summaries and reporting |
-| `promote` | Promotion decisions and workflow |
-
-Run `uv run autopilot <command> --help` for subcommands and flags.
+- **Uniform, Typed Interface**: Compose systems the same way you compose PyTorch components.
+- **Structured Feedback**: `backward()` fills `param.grad` with actionable feedback, not just opaque scores.
+- **Real Code/State Versioning**: `FileStore` uses content addressing and snapshots for atomic rollbacks.
+- **Persistent Memory**: `FileMemory` records what was tried and what failed across epochs to block regression-prone strategies.
+- **Policy Gating**: Use `MinGate`, `MaxGate`, and `RangeGate` to enforce quality bars and automate early stopping.
+- **Production Infrastructure**: Built-in CLI for experiments, project health, dataset management, and audit trails via `--expose`.
 
 ## Package layout
 
@@ -181,63 +152,6 @@ src/autopilot/
   cli/          # argparse CLI, commands, context, output
   tracking/     # manifest, events, command history
   policy/       # Policy, Gate base classes
-```
-
-## AI module
-
-The `autopilot.ai` module provides dataset generation, judging, and agent-driven optimization:
-
-- **DataGenerator**: slot planning, step-based LLM workflows, checkpointing, stratified splitting
-- **Judge**: per-item step workflows, checkpointing, summary aggregation
-- **Steps**: `LLMStep` (structured output), `PythonStep` (deterministic code), `BackStep` (conditional retry)
-- **Agent / AgentOptimizer**: wraps a coding agent (e.g. Claude Code) as an optimizer that reads text gradients and applies code changes
-- **JudgeLoss**: wraps a Judge as a Loss -- accumulates feedback per batch, `backward()` fills `param.grad` with structured text
-- **Data**: `ListDataset`, `StreamingDataset`, `StratifiedSplitter`, `SlotPlanner`
-- **Runtime**: `RPMLimiter`, `ParallelRunner` for rate-limited concurrent execution
-
-Subclass `DataGenerator` and `Judge` in project overlays. Pass instances directly -- no registries.
-
-## Multi-project workspaces
-
-AutoPilot supports multiple projects in one workspace under `autopilot/projects/<name>/`:
-
-```
-workspace/
-  autopilot/
-    pyproject.toml
-    projects/
-      my-project/
-        cli.py
-        trainer.py
-        ai/
-        experiments/
-        datasets/
-```
-
-Each project has a `cli.py` that subclasses `AutoPilotCLI` and wires components in `__init__`:
-
-```python
-from autopilot.cli.main import AutoPilotCLI
-
-
-class MyCLI(AutoPilotCLI, project='my-project'):
-  def __init__(self):
-    super().__init__()
-    self.module = my_module
-    self.generator = MyGenerator()
-    self.judge = MyJudge()
-
-
-MyCLI()()
-```
-
-Use `--project` / `-p` to select a project, or let AutoPilot auto-detect from CWD under `autopilot/projects/`:
-
-```bash
-autopilot ai generate run -p my-project --config gen.json
-autopilot project list
-autopilot project init new-project
-autopilot project doctor my-project
 ```
 
 ## Concepts and guides
