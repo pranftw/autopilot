@@ -1,0 +1,27 @@
+[
+  {
+    "pattern": "credit card|charged|bill|refund",
+    "category": "billing",
+    "priority": 1
+  },
+  {
+    "pattern": "error|api|crash|timeout|500",
+    "category": "technical",
+    "priority": 2
+  },
+  {
+    "pattern": "what|your|store",
+    "category": "general",
+    "priority": 3
+  },
+  {
+    "pattern": "need",
+    "category": "account",
+    "priority": 4
+  },
+  {
+    "pattern": "when|will|package",
+    "category": "shipping",
+    "priority": 5
+  }
+]

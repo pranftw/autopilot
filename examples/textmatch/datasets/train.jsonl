@@ -1,0 +1,5 @@
+{"item_id": "train_1", "text": "My credit card was charged twice for order #1234", "expected_category": "billing"}
+{"item_id": "train_2", "text": "The API returns a 500 error when I call /users endpoint", "expected_category": "technical"}
+{"item_id": "train_3", "text": "What are your store hours on weekends?", "expected_category": "general"}
+{"item_id": "train_4", "text": "I need to update my email address on my account", "expected_category": "account"}
+{"item_id": "train_5", "text": "When will my package arrive? Tracking shows no updates", "expected_category": "shipping"}

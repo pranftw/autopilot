@@ -1,0 +1,4 @@
+{"item_id": "v1", "question": "What is the capital of Japan?", "expected": "Tokyo"}
+{"item_id": "v2", "question": "What is the square root of 144?", "expected": "12"}
+{"item_id": "v3", "question": "Who painted the Mona Lisa?", "expected": "Leonardo da Vinci"}
+{"item_id": "v4", "question": "What is the chemical symbol for gold?", "expected": "Au"}

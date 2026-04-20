@@ -1,0 +1,46 @@
+[project]
+name = "autopilot-example-textmatch"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["autopilot"]
+
+[tool.uv.sources]
+autopilot = { path = "../..", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["textmatch"]
+
+[tool.ruff]
+indent-width = 2
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "E402",
+  "F",
+  "I",
+  "Q",
+  "W191",
+  "TID",
+]
+
+[tool.ruff.lint.flake8-quotes]
+inline-quotes = 'single'
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.isort]
+from-first = true
+no-sections = true
+lines-between-types = 0
+known-first-party = ["autopilot", "textmatch"]
+
+[tool.ruff.format]
+quote-style = 'single'
+indent-style = 'space'

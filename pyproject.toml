@@ -1,0 +1,63 @@
+[project]
+name = "autopilot"
+version = "0.1.0"
+description = "AutoPilot: self-optimizing framework for AI agents with formal train/val/test workflows"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic-ai>=1.77.0",
+    "requests>=2.33.1",
+]
+
+[project.scripts]
+autopilot = "autopilot.cli.main:main"
+
+[dependency-groups]
+dev = [
+  "ruff>=0.15.0",
+  "ty>=0.0.15",
+  "pytest>=8.0",
+  "pytest-asyncio>=1.3.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/autopilot"]
+
+[tool.ruff]
+indent-width = 2
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "E402",
+  "F",
+  "I",
+  "Q",
+  "W191",
+  "TID",
+]
+
+[tool.ruff.lint.flake8-quotes]
+inline-quotes = 'single'
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.isort]
+from-first = true
+no-sections = true
+lines-between-types = 0
+known-first-party = ["autopilot"]
+
+[tool.ruff.format]
+quote-style = 'single'
+indent-style = 'space'
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
