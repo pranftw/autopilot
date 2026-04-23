@@ -1,6 +1,6 @@
 """Lightning-style Trainer.fit() for text classification rules.
 
-Demonstrates: AutoPilotModule, Trainer, Policy, Store, StoreCheckpoint --
+Demonstrates: AutoPilotModule, Trainer, Policy, Store, StoreCheckpointCallback --
 same components as run.py but orchestrated by Trainer automatically.
 """
 

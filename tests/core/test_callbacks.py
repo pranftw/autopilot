@@ -1,9 +1,9 @@
 """Tests for Callback base class and Lightning-style hooks."""
 
-from autopilot.core.callbacks import Callback
-from autopilot.core.models import Datum
+from autopilot.core.callbacks.callback import Callback
 from autopilot.core.module import Module
 from autopilot.core.trainer import Trainer
+from autopilot.core.types import Datum
 from typing import Any
 
 

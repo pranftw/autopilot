@@ -1,13 +1,15 @@
 """Trainer integration with Policy and Store."""
 
 from autopilot.core.loss import Loss
-from autopilot.core.models import Datum, GateResult, Result
+from autopilot.core.models import Result
 from autopilot.core.module import AutoPilotModule
 from autopilot.core.optimizer import Optimizer
 from autopilot.core.parameter import Parameter
 from autopilot.core.trainer import Trainer
+from autopilot.core.types import Datum, GateResult
 from autopilot.data.dataloader import DataLoader
 from autopilot.policy.policy import Policy
+from helpers import NumericGradient
 
 
 class _StubLoss(Loss):
@@ -20,7 +22,7 @@ class _StubLoss(Loss):
   def backward(self):
     for p in self._loss_parameters:
       if p.requires_grad:
-        p.grad = 'g'
+        p.grad = NumericGradient(value=1.0)
 
   def reset(self):
     pass
@@ -76,6 +78,26 @@ class _MockStore:
     self.checkouts.append(epoch)
 
 
+class _MockExperiment:
+  def __init__(self, store=None):
+    self.store = store
+    self.should_rollback = False
+    self.best_epoch = 0
+
+  def rollback(self, to_epoch):
+    if self.store:
+      self.store.checkout(to_epoch)
+
+  def on_epoch_complete(self, epoch, train_metrics):
+    pass
+
+  def on_validation_complete(self, epoch, val_metrics, metric_metadata=None):
+    pass
+
+  def on_loop_complete(self, loop_result):
+    pass
+
+
 def _loader(n: int = 1) -> DataLoader:
   return DataLoader([Datum() for _ in range(n)], batch_size=1)
 
@@ -101,7 +123,8 @@ class TestTrainerPolicy:
     mod = _PolicyModule()
     pol = _GatePolicy([GateResult.FAIL])
     store = _MockStore()
-    trainer = Trainer(policy=pol, store=store)
+    experiment = _MockExperiment(store=store)
+    trainer = Trainer(policy=pol, experiment=experiment)
     trainer.fit(mod, train_dataloaders=_loader(1), max_epochs=5)
     assert store.checkouts == [0]
 
@@ -116,9 +139,10 @@ class TestTrainerPolicy:
   def test_best_epoch_tracking(self):
     mod = _PolicyModule()
     pol = _GatePolicy([GateResult.PASS, GateResult.PASS, GateResult.PASS])
-    trainer = Trainer(policy=pol)
+    experiment = _MockExperiment()
+    trainer = Trainer(policy=pol, experiment=experiment)
     trainer.fit(mod, train_dataloaders=_loader(1), max_epochs=3)
-    assert trainer._best_epoch - 1 == 2
+    assert experiment.best_epoch - 1 == 2
 
   def test_no_policy_no_error(self):
     mod = _PolicyModule()
@@ -129,7 +153,7 @@ class TestTrainerPolicy:
   def test_no_store_on_fail(self):
     mod = _PolicyModule()
     pol = _GatePolicy([GateResult.FAIL])
-    trainer = Trainer(policy=pol, store=None)
+    trainer = Trainer(policy=pol)
     out = trainer.fit(mod, train_dataloaders=_loader(1), max_epochs=3)
     assert out['total_epochs'] == 1
     assert out['epochs'][0].get('stopped') is True

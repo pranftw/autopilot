@@ -25,6 +25,20 @@ class TestAtomicWriteJson:
       atomic_write_json(path, {'bad': object()})
     assert not path.exists()
 
+  def test_list_payload(self, tmp_path):
+    path = tmp_path / 'list.json'
+    payload = [{'name': 'a'}, {'name': 'b'}]
+    atomic_write_json(path, payload)
+    result = read_json(path)
+    assert result == payload
+
+  def test_overwrites_existing(self, tmp_path):
+    path = tmp_path / 'test.json'
+    atomic_write_json(path, {'first': True})
+    atomic_write_json(path, {'second': True})
+    result = read_json(path)
+    assert result == {'second': True}
+
 
 class TestAppendJsonl:
   def test_single_record(self, tmp_path):

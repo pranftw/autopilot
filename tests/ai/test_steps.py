@@ -1,9 +1,23 @@
-"""Tests for step-based workflow engine."""
+"""Tests for step-based workflow engine, decorators, and execute() polymorphism."""
 
-from autopilot.ai.models import RetryConfig, RunConfig
-from autopilot.ai.steps import BackStep, LLMStep, PythonStep, run_step_workflow
+from autopilot.ai.evaluation.generator import GeneratorAgent, stratify_by
+from autopilot.ai.evaluation.judge import JudgeAgent
+from autopilot.ai.evaluation.schemas import RetryConfig, RunConfig
+from autopilot.ai.evaluation.steps import (
+  BackStep,
+  LLMStep,
+  PythonStep,
+  Step,
+  StepLoopback,
+  back_step,
+  collect_steps,
+  llm_step,
+  python_step,
+  run_step_workflow,
+)
 from autopilot.core.errors import AIError
 from pydantic import BaseModel
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
@@ -155,7 +169,7 @@ class TestRunStepWorkflow:
     assert ctx['second'] == {'sum': 2}
 
   @pytest.mark.asyncio
-  @patch('autopilot.ai.steps.Agent')
+  @patch('autopilot.ai.evaluation.steps.Agent')
   async def test_llm_step_creates_agent(self, mock_agent_cls) -> None:
     mock_result = MagicMock()
     mock_result.output = DummyOutput(value='test')
@@ -169,7 +183,7 @@ class TestRunStepWorkflow:
     mock_agent_cls.assert_called_once()
 
   @pytest.mark.asyncio
-  @patch('autopilot.ai.steps.Agent')
+  @patch('autopilot.ai.evaluation.steps.Agent')
   async def test_llm_step_uses_instructions_fn(self, mock_agent_cls) -> None:
     mock_result = MagicMock()
     mock_result.output = DummyOutput(value='dyn')
@@ -231,7 +245,7 @@ class TestRunStepWorkflow:
     ]
     ctx = await run_step_workflow(steps, {}, 'm', _make_run_config())
     assert ctx['tail'] == {'done': True}
-    assert ctx['back_iterations'] == 0
+    assert 'back_iterations' not in ctx
 
   @pytest.mark.asyncio
   async def test_backstep_target_not_found(self) -> None:
@@ -276,7 +290,7 @@ class TestRunStepWorkflow:
       await run_step_workflow(steps, {}, 'm', _make_run_config())
 
   @pytest.mark.asyncio
-  @patch('autopilot.ai.steps.Agent')
+  @patch('autopilot.ai.evaluation.steps.Agent')
   async def test_llm_step_with_tools(self, mock_agent_cls) -> None:
     mock_result = MagicMock()
     mock_result.output = DummyOutput(value='with-tools')
@@ -290,3 +304,314 @@ class TestRunStepWorkflow:
     assert ctx['gen'].value == 'with-tools'
     _, kwargs = mock_agent_cls.call_args
     assert kwargs['tools'] is tools
+
+
+# step decorator tests
+
+
+class _DecoratorOutput(BaseModel):
+  text: str = ''
+
+
+class TestLLMStepDecorator:
+  def test_marks_method_with_meta(self) -> None:
+    @llm_step('gen', output_type=_DecoratorOutput)
+    def generate(self, ctx):
+      return ''
+
+    assert hasattr(generate, '_step_meta')
+
+  def test_meta_has_correct_fields(self) -> None:
+    @llm_step('gen', output_type=_DecoratorOutput, instructions='do it')
+    def generate(self, ctx):
+      return ''
+
+    meta = generate._step_meta
+    assert meta.kind == 'llm'
+    assert meta.name == 'gen'
+    assert meta.output_type is _DecoratorOutput
+    assert meta.instructions == 'do it'
+
+
+class TestPythonStepDecorator:
+  def test_marks_method_with_meta(self) -> None:
+    @python_step('exec')
+    def execute(self, ctx):
+      return {}
+
+    assert execute._step_meta.kind == 'python'
+    assert execute._step_meta.name == 'exec'
+
+
+class TestBackStepDecorator:
+  def test_marks_method_with_meta(self) -> None:
+    @back_step('retry', target='gen', max_iterations=5)
+    def should_retry(self, ctx):
+      return False
+
+    meta = should_retry._step_meta
+    assert meta.kind == 'back'
+    assert meta.target == 'gen'
+    assert meta.max_iterations == 5
+
+  def test_default_max_iterations(self) -> None:
+    @back_step('retry', target='gen')
+    def should_retry(self, ctx):
+      return False
+
+    assert should_retry._step_meta.max_iterations == 3
+
+
+class _StubGen:
+  @llm_step('generate', output_type=_DecoratorOutput)
+  def generate(self, ctx):
+    return 'prompt'
+
+  @python_step('execute')
+  def execute(self, ctx):
+    return {}
+
+  @back_step('retry', target='generate', max_iterations=2)
+  def should_retry(self, ctx):
+    return True
+
+  def undecorated(self):
+    pass
+
+
+class TestCollectSteps:
+  def test_collects_in_definition_order(self) -> None:
+    steps = collect_steps(_StubGen())
+    assert [s.name for s in steps] == ['generate', 'execute', 'retry']
+
+  def test_builds_llm_step(self) -> None:
+    steps = collect_steps(_StubGen())
+    assert isinstance(steps[0], LLMStep)
+    assert steps[0].output_type is _DecoratorOutput
+
+  def test_builds_python_step(self) -> None:
+    steps = collect_steps(_StubGen())
+    assert isinstance(steps[1], PythonStep)
+
+  def test_builds_back_step(self) -> None:
+    steps = collect_steps(_StubGen())
+    s = steps[2]
+    assert isinstance(s, BackStep)
+    assert s.target == 'generate'
+    assert s.max_iterations == 2
+
+  def test_raises_when_no_decorators(self) -> None:
+    class Empty:
+      pass
+
+    with pytest.raises(NotImplementedError, match='has no @step-decorated methods'):
+      collect_steps(Empty())
+
+  def test_ignores_undecorated_methods(self) -> None:
+    steps = collect_steps(_StubGen())
+    names = [s.name for s in steps]
+    assert 'undecorated' not in names
+
+
+class TestStratifyBy:
+  def test_simple_fields(self) -> None:
+    @stratify_by('domain')
+    class Gen(GeneratorAgent):
+      pass
+
+    item = type('Item', (), {'custom': type('C', (), {'domain': 'math'})()})()
+    gen = Gen()
+    assert gen.stratify_key(item) == 'math'
+
+  def test_dict_field_access(self) -> None:
+    @stratify_by('domain', 'difficulty')
+    class Gen(GeneratorAgent):
+      pass
+
+    item = type('Item', (), {'custom': {'domain': 'math', 'difficulty': 'hard'}})()
+    gen = Gen()
+    assert gen.stratify_key(item) == 'math:hard'
+
+  def test_dotted_field_paths(self) -> None:
+    @stratify_by('metadata.level')
+    class Gen(GeneratorAgent):
+      pass
+
+    item = type('Item', (), {'custom': {'metadata': {'level': 'expert'}}})()
+    gen = Gen()
+    assert gen.stratify_key(item) == 'expert'
+
+
+class TestDefineStepsIntegration:
+  def test_generator_collects_decorated_steps(self) -> None:
+    class MyGen(GeneratorAgent):
+      @llm_step('gen', output_type=_DecoratorOutput)
+      def gen(self, ctx):
+        return ''
+
+      @python_step('exec')
+      def exec_step(self, ctx):
+        return {}
+
+    g = MyGen()
+    steps = g.define_steps(None)
+    assert len(steps) == 2
+    assert steps[0].name == 'gen'
+
+  def test_generator_raises_when_no_steps(self) -> None:
+    class EmptyGen(GeneratorAgent):
+      pass
+
+    with pytest.raises(NotImplementedError):
+      EmptyGen().define_steps(None)
+
+  def test_override_define_steps_takes_precedence(self) -> None:
+    class CustomGen(GeneratorAgent):
+      @llm_step('gen', output_type=_DecoratorOutput)
+      def gen(self, ctx):
+        return ''
+
+      def define_steps(self, config):
+        return [PythonStep('custom', fn=lambda ctx: {})]
+
+    g = CustomGen()
+    steps = g.define_steps(None)
+    assert len(steps) == 1
+    assert steps[0].name == 'custom'
+
+  def test_judge_collects_decorated_steps(self) -> None:
+    class MyJudge(JudgeAgent):
+      @llm_step('judge', output_type=_DecoratorOutput)
+      def judge_step(self, ctx):
+        return ''
+
+    j = MyJudge()
+    steps = j.define_steps(None)
+    assert len(steps) == 1
+    assert steps[0].name == 'judge'
+
+
+# step.execute() polymorphism tests
+
+
+class TestStepExecuteBase:
+  @pytest.mark.asyncio
+  async def test_step_execute_base_raises(self) -> None:
+    step = Step('base')
+    with pytest.raises(NotImplementedError):
+      await step.execute({}, 'model', _make_run_config())
+
+
+class TestPythonStepExecute:
+  @pytest.mark.asyncio
+  async def test_python_step_execute_runs_fn(self) -> None:
+    step = PythonStep('py', lambda c: {'result': c.get('input', 0) + 1})
+    result = await step.execute({'input': 5}, 'model', _make_run_config())
+    assert result == {'result': 6}
+
+  @pytest.mark.asyncio
+  async def test_python_step_execute_returns_result(self) -> None:
+    step = PythonStep('py', lambda c: 'string result')
+    result = await step.execute({}, 'model', _make_run_config())
+    assert result == 'string result'
+
+
+class TestLLMStepExecute:
+  @pytest.mark.asyncio
+  @patch('autopilot.ai.evaluation.steps.Agent')
+  async def test_llm_step_execute_returns_output(self, mock_agent_cls) -> None:
+    mock_result = MagicMock()
+    mock_result.output = DummyOutput(value='test')
+    mock_agent_instance = MagicMock()
+    mock_agent_instance.run = AsyncMock(return_value=mock_result)
+    mock_agent_cls.return_value = mock_agent_instance
+
+    step = LLMStep('gen', output_type=DummyOutput, instructions='do it')
+    result = await step.execute({}, 'test-model', _make_run_config())
+    assert result.value == 'test'
+    mock_agent_cls.assert_called_once()
+
+
+class TestBackStepExecute:
+  @pytest.mark.asyncio
+  async def test_back_step_execute_returns_loopback_when_condition_true(self) -> None:
+    step = BackStep('back', 'target', lambda c: True)
+    result = await step.execute({}, 'model', _make_run_config())
+    assert isinstance(result, StepLoopback)
+    assert result.target_name == 'target'
+
+  @pytest.mark.asyncio
+  async def test_back_step_execute_returns_none_when_condition_false(self) -> None:
+    step = BackStep('back', 'target', lambda c: False)
+    result = await step.execute({}, 'model', _make_run_config())
+    assert result is None
+
+  @pytest.mark.asyncio
+  async def test_back_step_execute_returns_none_at_max_iterations(self) -> None:
+    step = BackStep('back', 'target', lambda c: True, max_iterations=2)
+    ctx = {'back_iterations': 2}
+    result = await step.execute(ctx, 'model', _make_run_config())
+    assert result is None
+
+
+class TestStepLoopback:
+  def test_step_loopback_holds_target_index(self) -> None:
+    lb = StepLoopback(target_index=3)
+    assert lb.target_index == 3
+
+  def test_step_loopback_holds_target_name(self) -> None:
+    lb = StepLoopback(target_index=-1, target_name='counter')
+    assert lb.target_name == 'counter'
+
+
+class TestCustomStepExecute:
+  @pytest.mark.asyncio
+  async def test_custom_step_in_workflow(self) -> None:
+    class CustomStep(Step):
+      async def execute(
+        self,
+        context: dict[str, Any],
+        model: str,
+        run_config: RunConfig,
+      ) -> Any:
+        return {'custom': True, 'input_count': len(context)}
+
+    steps = [
+      PythonStep('setup', lambda c: {'ready': True}),
+      CustomStep('custom'),
+    ]
+    ctx = await run_step_workflow(steps, {}, 'model', _make_run_config())
+    assert ctx['custom'] == {'custom': True, 'input_count': 1}
+
+  @pytest.mark.asyncio
+  async def test_backstep_target_not_found_raises(self) -> None:
+    steps = [BackStep('back', 'missing', lambda c: True)]
+    with pytest.raises(AIError, match='not found'):
+      await run_step_workflow(steps, {}, 'm', _make_run_config())
+
+  @pytest.mark.asyncio
+  async def test_backstep_loopback_in_workflow(self) -> None:
+    steps = [
+      PythonStep(
+        'counter',
+        lambda c: {'n': c.get('counter', {}).get('n', 0) + 1},
+      ),
+      BackStep(
+        'back',
+        'counter',
+        lambda c: c.get('counter', {}).get('n', 0) < 3,
+        max_iterations=5,
+      ),
+    ]
+    ctx = await run_step_workflow(steps, {}, 'm', _make_run_config())
+    assert ctx['counter']['n'] == 3
+    assert ctx['back_iterations'] == 2
+
+  @pytest.mark.asyncio
+  async def test_backstep_max_iterations_stops(self) -> None:
+    steps = [
+      PythonStep('counter', lambda c: {'n': 1}),
+      BackStep('back', 'counter', lambda c: True, max_iterations=2),
+    ]
+    ctx = await run_step_workflow(steps, {}, 'm', _make_run_config())
+    assert ctx['back_iterations'] == 2

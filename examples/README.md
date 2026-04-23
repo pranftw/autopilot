@@ -4,8 +4,8 @@ Self-contained examples demonstrating the AutoPilot optimization framework.
 
 | Example | What it demonstrates | Requirements |
 | --- | --- | --- |
-| [textmatch](textmatch/) | Regex-rule optimization with Module, Loss, Optimizer, Trainer, Policy, Store | None (runs offline) |
-| [protim](protim/) | Agent-optimized prompt with ClaudeCodeAgent for inference and optimization | `claude` CLI |
+| [textmatch](textmatch/) | Regex-rule optimization with Module, Loss, Optimizer, `Trainer`, Policy, `Experiment` (with `FileStore`) | None (runs offline) |
+| [protim](protim/) | LLM-optimized prompt using ClaudeCodeAgent for inference and optimization | `claude` CLI |
 
 ## Getting started
 

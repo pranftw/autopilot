@@ -1,7 +1,8 @@
 """Tests for Policy and Metric base classes."""
 
-from autopilot.core.metric import CompositeMetric, Metric
-from autopilot.core.models import Datum, GateResult, Result
+from autopilot.core.metric import Metric, MetricCollection
+from autopilot.core.models import Result
+from autopilot.core.types import Datum, GateResult
 from autopilot.policy.gates import MinGate
 from autopilot.policy.policy import Policy
 from autopilot.policy.quality_first import QualityFirstMetric
@@ -76,7 +77,7 @@ class TestMetricDefaults:
     assert m.compute() == {'total': 0.0}
 
 
-class TestCompositeMetric:
+class TestMetricCollection:
   def test_compose_via_add(self) -> None:
     class A(Metric):
       def update(self, datum: Datum) -> None:
@@ -93,10 +94,10 @@ class TestCompositeMetric:
         return {'b': 2.0}
 
     composite = A() + B()
-    assert isinstance(composite, CompositeMetric)
+    assert isinstance(composite, MetricCollection)
     assert composite.compute() == {'a': 1.0, 'b': 2.0}
 
-  def test_composite_update_delegates(self) -> None:
+  def test_collection_update_delegates(self) -> None:
     class Counter(Metric):
       def __init__(self) -> None:
         super().__init__()
@@ -110,13 +111,13 @@ class TestCompositeMetric:
 
     c1 = Counter()
     c2 = Counter()
-    composite = CompositeMetric([c1, c2])
+    composite = MetricCollection({'c1': c1, 'c2': c2})
     composite.update(Datum(metadata={'split': 'train'}))
     assert c1._count == 1
     assert c2._count == 1
 
-  def test_composite_reset(self) -> None:
-    class Counter(Metric):
+  def test_collection_reset(self) -> None:
+    class CounterA(Metric):
       def __init__(self) -> None:
         super().__init__()
         self._count = 0
@@ -125,15 +126,29 @@ class TestCompositeMetric:
         self._count += 1
 
       def compute(self) -> dict[str, float]:
-        return {'count': float(self._count)}
+        return {'a_count': float(self._count)}
 
       def reset(self) -> None:
         self._count = 0
 
-    composite = CompositeMetric([Counter(), Counter()])
+    class CounterB(Metric):
+      def __init__(self) -> None:
+        super().__init__()
+        self._count = 0
+
+      def update(self, datum: Datum) -> None:
+        self._count += 1
+
+      def compute(self) -> dict[str, float]:
+        return {'b_count': float(self._count)}
+
+      def reset(self) -> None:
+        self._count = 0
+
+    composite = MetricCollection({'x': CounterA(), 'y': CounterB()})
     composite.update(Datum(metadata={'split': 'train'}))
     composite.reset()
-    assert composite.compute() == {'count': 0.0}
+    assert composite.compute() == {'a_count': 0.0, 'b_count': 0.0}
 
 
 class TestQualityFirstMetric:

@@ -6,9 +6,11 @@ experiment code versioning.
 
 Idempotent constructor follows the Experiment.__init__ pattern:
 if slug exists, loads existing state; otherwise initializes fresh.
+
+Fully decoupled from concrete parameter types: operates exclusively
+through param.snapshot() / param.restore().
 """
 
-from autopilot.ai.parameter import PathParameter
 from autopilot.core.errors import StoreError, TrackingError
 from autopilot.core.parameter import Parameter
 from autopilot.core.store import (
@@ -32,6 +34,14 @@ import json
 import os
 
 
+def _hash_content(text: str) -> str:
+  return hashlib.sha256(text.encode('utf-8')).hexdigest()
+
+
+def _hash_bytes(data: bytes) -> str:
+  return hashlib.sha256(data).hexdigest()
+
+
 def _hash_file(path: Path) -> str:
   h = hashlib.sha256()
   with open(path, 'rb') as f:
@@ -40,11 +50,7 @@ def _hash_file(path: Path) -> str:
   return h.hexdigest()
 
 
-def _hash_bytes(data: bytes) -> str:
-  return hashlib.sha256(data).hexdigest()
-
-
-def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+def _atomic_write_json_safe(path: Path, payload: dict[str, Any]) -> None:
   try:
     atomic_write_json(path, payload)
   except TrackingError as exc:
@@ -59,13 +65,37 @@ class FileStore(Store):
   """Content-addressed file store. One instance per experiment slug.
 
   Idempotent: if slug exists in refs.json, loads state.
-  Otherwise scans parameters, stores objects, writes epoch_0 baseline.
+  Otherwise snapshots parameters, stores objects, writes epoch_0 baseline.
+
+  Storage layout:
+    objects/<2-char-prefix>/<rest>          -- SHA-256 hashed blobs, deduplicated
+    snapshots/<slug>/epoch_<N>.json        -- JSON manifest mapping composite keys to FileEntry
+    refs.json                              -- slug -> {latest_epoch, parent_slug,
+                                                parent_epoch} + HEAD
+
+  Composite keys: snapshot entries use 'param_name/state_key' format
+  (e.g. 'param_0/main.py'). Parameters are keyed by construction order
+  (param_0, param_1, ...), not by any user-facing name.
+
+  Locking: exclusive file lock via os.open(O_CREAT | O_EXCL) during snapshot
+  writes. A crash leaves a stale .lock that must be manually removed.
+
+  Fully decoupled from concrete parameter types: operates exclusively
+  through param.snapshot() / param.restore().
+
+  Gotchas:
+    - FileEntry.mtime is always 0.0 for snapshot content (no filesystem timestamps).
+    - promote() checks for external modifications and raises StoreError if files
+      were edited outside the store between epochs.
+    - Changing the parameter list between runs may misalign keys.
   """
 
   def __init__(self, path: str | Path, slug: str, parameters: list[Parameter]) -> None:
     self._path = Path(path)
     self._slug = slug
-    self._parameters = list(parameters)
+    self._param_names: dict[str, Parameter] = {}
+    for idx, param in enumerate(parameters):
+      self._param_names[f'param_{idx}'] = param
 
     self._objects_dir = self._path / 'objects'
     self._snapshots_dir = self._path / 'snapshots'
@@ -82,7 +112,7 @@ class FileStore(Store):
     self._objects_dir.mkdir(parents=True, exist_ok=True)
     self._snapshots_dir.mkdir(parents=True, exist_ok=True)
 
-    manifest = self._build_snapshot_from_disk()
+    manifest = self._build_snapshot()
     manifest.epoch = 0
     self._save_snapshot(slug, 0, manifest)
 
@@ -108,7 +138,7 @@ class FileStore(Store):
   def path(self) -> Path:
     return self._path
 
-  # -- snapshot -----------------------------------------------------------
+  # snapshot
 
   def snapshot(self, epoch: int) -> SnapshotManifest:
     expected = self._epoch + 1
@@ -117,7 +147,7 @@ class FileStore(Store):
 
     self._acquire_lock()
     try:
-      manifest = self._build_snapshot_from_disk()
+      manifest = self._build_snapshot()
       manifest.epoch = epoch
       self._save_snapshot(self._slug, epoch, manifest)
 
@@ -131,22 +161,20 @@ class FileStore(Store):
 
     return manifest
 
-  # -- checkout -----------------------------------------------------------
+  # checkout
 
   def checkout(self, epoch: int) -> None:
     snap = self._load_snapshot(self._slug, epoch)
-
-    for key, entry in snap.entries.items():
-      target = self._resolve_key_path(key)
-      content = self._read_object(entry.hash)
-      target.parent.mkdir(parents=True, exist_ok=True)
-      target.write_bytes(content)
+    grouped = self._group_by_param(snap)
+    for name, param in self._param_names.items():
+      if name in grouped:
+        param.restore(grouped[name])
 
     refs = self._load_refs()
     refs['HEAD'] = {'slug': self._slug, 'epoch': epoch}
     self._save_refs(refs)
 
-  # -- diff ---------------------------------------------------------------
+  # diff
 
   def diff(self, epoch_a: int, slug_b: str, epoch_b: int) -> DiffResult:
     snap_a = self._load_snapshot(self._slug, epoch_a)
@@ -191,7 +219,7 @@ class FileStore(Store):
 
     return DiffResult(entries=entries)
 
-  # -- branch -------------------------------------------------------------
+  # branch
 
   def branch(self, new_slug: str, from_epoch: int) -> None:
     refs = self._load_refs()
@@ -216,7 +244,7 @@ class FileStore(Store):
     }
     self._save_refs(refs)
 
-  # -- merge --------------------------------------------------------------
+  # merge
 
   def merge(self, from_slug: str, from_epoch: int | None = None) -> MergeResult:
     refs = self._load_refs()
@@ -284,7 +312,7 @@ class FileStore(Store):
       merged_snapshot=merged_snap,
     )
 
-  # -- log ----------------------------------------------------------------
+  # log
 
   def log(self) -> list[SnapshotEntry]:
     refs = self._load_refs()
@@ -304,26 +332,26 @@ class FileStore(Store):
       )
     return entries
 
-  # -- status -------------------------------------------------------------
+  # status
 
   def status(self) -> StatusResult:
     snap = self._load_snapshot(self._slug, self._epoch)
     entries: list[StatusEntry] = []
 
     current_keys: set[str] = set()
-    for param_name, files in self._scan_parameters().items():
-      for file_path in files:
-        key = self._make_key(param_name, file_path)
-        current_keys.add(key)
+    for name, param in self._param_names.items():
+      content = param.snapshot()
+      for state_key, text in content.items():
+        full_key = f'{name}/{state_key}'
+        current_keys.add(full_key)
+        current_hash = _hash_content(text)
 
-        if key not in snap.entries:
-          entries.append(StatusEntry(path=key, status='added'))
+        if full_key not in snap.entries:
+          entries.append(StatusEntry(path=full_key, status='added'))
+        elif current_hash != snap.entries[full_key].hash:
+          entries.append(StatusEntry(path=full_key, status='modified'))
         else:
-          current_hash = _hash_file(file_path)
-          if current_hash != snap.entries[key].hash:
-            entries.append(StatusEntry(path=key, status='modified'))
-          else:
-            entries.append(StatusEntry(path=key, status='unchanged'))
+          entries.append(StatusEntry(path=full_key, status='unchanged'))
 
     for key in snap.entries:
       if key not in current_keys:
@@ -331,29 +359,28 @@ class FileStore(Store):
 
     return StatusResult(entries=entries)
 
-  # -- promote ------------------------------------------------------------
+  # promote
 
   def promote(self, epoch: int) -> None:
     snap = self._load_snapshot(self._slug, epoch)
+    current_snap = self._load_snapshot(self._slug, self._epoch)
 
+    current_content = self._snapshot_all_params()
     for key, entry in snap.entries.items():
-      target = self._resolve_key_path(key)
-      if target.exists():
-        current_hash = _hash_file(target)
+      if key in current_content:
+        current_hash = _hash_content(current_content[key])
         if current_hash != entry.hash:
-          expected_snap = self._load_snapshot(self._slug, self._epoch)
-          expected = expected_snap.entries.get(key)
+          expected = current_snap.entries.get(key)
           if expected and current_hash != expected.hash:
             raise StoreError(
               f'external modification detected for {key}: '
               f'expected {expected.hash[:12]}, found {current_hash[:12]}'
             )
 
-    for key, entry in snap.entries.items():
-      target = self._resolve_key_path(key)
-      content = self._read_object(entry.hash)
-      target.parent.mkdir(parents=True, exist_ok=True)
-      target.write_bytes(content)
+    grouped = self._group_by_param(snap)
+    for name, param in self._param_names.items():
+      if name in grouped:
+        param.restore(grouped[name])
 
     promoted_manifest = SnapshotManifest(
       epoch=0,
@@ -366,78 +393,36 @@ class FileStore(Store):
     refs['HEAD'] = {'slug': self._slug, 'epoch': epoch}
     self._save_refs(refs)
 
-  # -- internal helpers ---------------------------------------------------
+  # internal helpers
 
-  def _scan_parameters(self) -> dict[str, list[Path]]:
-    result: dict[str, list[Path]] = {}
-    for param in self._parameters:
-      name = self._param_name(param)
-      if isinstance(param, PathParameter):
-        result[name] = param.matched_files()
-      else:
-        result[name] = []
-    return result
-
-  def _param_name(self, param: Parameter) -> str:
-    for p in self._parameters:
-      if p is param:
-        idx = self._parameters.index(p)
-        if isinstance(p, PathParameter) and p.source:
-          return Path(p.source).name
-        return f'param_{idx}'
-    return 'unknown'
-
-  def _make_key(self, param_name: str, file_path: Path) -> str:
-    param = self._find_param_by_name(param_name)
-    if isinstance(param, PathParameter) and param.source:
-      source = Path(param.source).expanduser()
-      try:
-        rel = file_path.relative_to(source)
-      except ValueError:
-        rel = file_path.name
-    else:
-      rel = file_path.name
-    return f'{param_name}::{rel}'
-
-  def _find_param_by_name(self, name: str) -> Parameter | None:
-    for param in self._parameters:
-      if self._param_name(param) == name:
-        return param
-    return None
-
-  def _resolve_key_path(self, key: str) -> Path:
-    param_name, rel_str = key.split('::', 1)
-    param = self._find_param_by_name(param_name)
-    if isinstance(param, PathParameter) and param.source:
-      source = Path(param.source).expanduser()
-      return source / rel_str
-    raise StoreError(f'cannot resolve path for key {key!r}')
-
-  def _build_snapshot_from_disk(self) -> SnapshotManifest:
+  def _build_snapshot(self) -> SnapshotManifest:
     entries: dict[str, FileEntry] = {}
-    for param_name, files in self._scan_parameters().items():
-      for file_path in files:
-        content_hash = _hash_file(file_path)
-        stat = file_path.stat()
-        self._store_object(content_hash, file_path)
-        key = self._make_key(param_name, file_path)
-        entries[key] = FileEntry(hash=content_hash, size=stat.st_size, mtime=stat.st_mtime)
+    for name, param in self._param_names.items():
+      content = param.snapshot()
+      for state_key, text in content.items():
+        full_key = f'{name}/{state_key}'
+        sha = _hash_content(text)
+        self._store_object_bytes(sha, text.encode('utf-8'))
+        entries[full_key] = FileEntry(hash=sha, size=len(text), mtime=0.0)
     return SnapshotManifest(epoch=0, timestamp=_now_iso(), entries=entries)
 
-  def _store_object(self, content_hash: str, source: Path) -> None:
-    prefix = content_hash[:2]
-    rest = content_hash[2:]
-    obj_dir = self._objects_dir / prefix
-    obj_path = obj_dir / rest
-    if obj_path.exists():
-      return
-    obj_dir.mkdir(parents=True, exist_ok=True)
-    tmp = obj_path.with_suffix('.tmp')
-    try:
-      tmp.write_bytes(source.read_bytes())
-      tmp.replace(obj_path)
-    except OSError as exc:
-      raise StoreError(f'failed to store object {content_hash}: {exc}') from exc
+  def _snapshot_all_params(self) -> dict[str, str]:
+    """Get all current parameter content as {full_key: text}."""
+    result: dict[str, str] = {}
+    for name, param in self._param_names.items():
+      content = param.snapshot()
+      for state_key, text in content.items():
+        result[f'{name}/{state_key}'] = text
+    return result
+
+  def _group_by_param(self, snap: SnapshotManifest) -> dict[str, dict[str, str]]:
+    """Group snapshot entries by parameter name and load object content."""
+    grouped: dict[str, dict[str, str]] = {}
+    for full_key, entry in snap.entries.items():
+      param_name, _, rel_key = full_key.partition('/')
+      text = self._read_object(entry.hash).decode('utf-8')
+      grouped.setdefault(param_name, {})[rel_key] = text
+    return grouped
 
   def _store_object_bytes(self, content_hash: str, data: bytes) -> None:
     prefix = content_hash[:2]
@@ -472,7 +457,7 @@ class FileStore(Store):
       raise StoreError(f'failed to load refs: {exc}') from exc
 
   def _save_refs(self, refs: dict[str, Any]) -> None:
-    _atomic_write_json(self._refs_file, refs)
+    _atomic_write_json_safe(self._refs_file, refs)
 
   def _load_snapshot(self, slug: str, epoch: int) -> SnapshotManifest:
     path = self._snapshots_dir / slug / f'epoch_{epoch}.json'
@@ -487,7 +472,7 @@ class FileStore(Store):
 
   def _save_snapshot(self, slug: str, epoch: int, manifest: SnapshotManifest) -> None:
     path = self._snapshots_dir / slug / f'epoch_{epoch}.json'
-    _atomic_write_json(path, manifest.to_dict())
+    _atomic_write_json_safe(path, manifest.to_dict())
 
   def _acquire_lock(self) -> None:
     self._path.mkdir(parents=True, exist_ok=True)

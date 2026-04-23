@@ -1,8 +1,8 @@
 """Tests for AutoPilotModule (LightningModule pattern)."""
 
-from autopilot.core.models import Datum
 from autopilot.core.module import AutoPilotModule, Module
 from autopilot.core.parameter import Parameter
+from autopilot.core.types import Datum
 import pytest
 
 

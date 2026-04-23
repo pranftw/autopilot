@@ -1,9 +1,9 @@
 """EpochLoop stepping and edge cases."""
 
-from autopilot.core.loops import EpochLoop
-from autopilot.core.models import Datum
+from autopilot.core.loops.epoch import EpochLoop
 from autopilot.core.module import Module
 from autopilot.core.trainer import Trainer
+from autopilot.core.types import Datum
 from autopilot.data.dataloader import DataLoader
 
 

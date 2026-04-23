@@ -17,6 +17,7 @@ class WorkspaceCommand(Command):
 
   @subcommand('init', help='Initialize workspace')
   def init(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Create the standard autopilot directory layout."""
     ctx.output.info('Initializing workspace...')
     ws = ctx.workspace
     autopilot = ctx.autopilot_dir
@@ -33,6 +34,7 @@ class WorkspaceCommand(Command):
 
   @subcommand('doctor', help='Check workspace health')
   def doctor(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Verify required directories exist and report issues."""
     ctx.output.info('Checking workspace health...')
     ws = ctx.workspace
 
@@ -64,6 +66,7 @@ class WorkspaceCommand(Command):
 
   @subcommand('tree', help='Show autopilot directory tree')
   def tree(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Display the autopilot directory tree structure."""
     ctx.output.info('Workspace tree (autopilot):')
     base = ctx.autopilot_dir
     if not base.exists():

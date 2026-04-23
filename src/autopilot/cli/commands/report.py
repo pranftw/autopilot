@@ -17,19 +17,21 @@ import argparse
 class ReportCompare(Command):
   name = 'compare'
   help = 'Compare experiments or runs'
-  baseline = Argument('--baseline', default='', metavar='SLUG', help='baseline experiment slug')
+  baseline = Argument('--baseline', default=None, metavar='SLUG', help='baseline experiment slug')
   candidate = Argument(
     '--candidate',
-    default='',
+    default=None,
     metavar='SLUG',
     help='candidate experiment slug',
   )
 
   def forward(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Compare two experiments side by side."""
     baseline_slug = args.baseline or ctx.experiment
     candidate_slug = args.candidate
     if not baseline_slug or not candidate_slug:
-      raise ValueError('compare requires --baseline and --candidate (or --experiment for baseline)')
+      ctx.output.error('compare requires --baseline and --candidate (or --experiment for baseline)')
+      return
     ctx.output.info('Comparing experiments...')
     baseline_dir = resolve_experiment_dir(ctx.workspace, baseline_slug)
     candidate_dir = resolve_experiment_dir(ctx.workspace, candidate_slug)
@@ -53,9 +55,11 @@ class ReportCommand(Command):
 
   @subcommand('summary', help='Summarize experiment outcomes')
   def summary(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Summarize an experiment's manifest, events, and split results."""
     slug = ctx.experiment
     if not slug:
-      raise ValueError('experiment slug required (--experiment)')
+      ctx.output.error('experiment slug required (--experiment)')
+      return
     exp_dir = resolve_experiment_dir(ctx.workspace, slug)
     ctx.output.info(f'Summarizing experiment {slug!r}...')
     summary = _gather_summary(exp_dir)

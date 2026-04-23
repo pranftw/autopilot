@@ -1,6 +1,6 @@
 """DataLoader. Mirrors torch.utils.data.DataLoader."""
 
-from autopilot.core.models import Datum
+from autopilot.core.types import Datum
 from autopilot.data.dataset import Dataset, IterableDataset, ListDataset
 from typing import Any, Callable, Iterator
 import math
@@ -15,7 +15,10 @@ def _default_collate(batch: list[Any]) -> Datum:
     elif isinstance(item, dict):
       items.append(Datum(**{k: v for k, v in item.items() if k in Datum.__dataclass_fields__}))
     else:
-      items.append(Datum(metadata={'raw': item}))
+      raise TypeError(
+        f'DataLoader: expected Datum or dict, got {type(item).__name__}. '
+        f'Provide a custom collate_fn for non-Datum types.'
+      )
   if len(items) == 1:
     return items[0]
   return Datum(items=items)

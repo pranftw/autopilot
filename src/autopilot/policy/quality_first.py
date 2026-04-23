@@ -4,7 +4,8 @@ Triggers human review on warn-level gate results when configured.
 """
 
 from autopilot.core.metric import Metric
-from autopilot.core.models import Datum, GateResult, Result
+from autopilot.core.models import Result
+from autopilot.core.types import Datum, GateResult
 from autopilot.policy.gates import Gate
 from autopilot.policy.policy import Policy
 
@@ -58,10 +59,12 @@ class QualityFirstPolicy(Policy):
 class QualityFirstMetric(Metric):
   """Metric that accumulates datum metrics and applies quality-first gates on compute()."""
 
+  higher_is_better = True
+
   def __init__(self, gates: list[Gate] | None = None) -> None:
     super().__init__()
     self._gates = gates or []
-    self._accumulated: dict[str, list[float]] = {}
+    self.add_state('_accumulated', dict)
 
   def name(self) -> str:
     return 'quality_first'
@@ -75,9 +78,6 @@ class QualityFirstMetric(Metric):
     for key, values in self._accumulated.items():
       metrics[key] = sum(values) / len(values) if values else 0.0
     return metrics
-
-  def reset(self) -> None:
-    self._accumulated = {}
 
   def to_result(self, metrics: dict[str, float] | None = None) -> Result:
     """Build a Result by applying gates to the given or computed metrics."""

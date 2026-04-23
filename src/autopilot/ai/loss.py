@@ -1,19 +1,27 @@
-"""JudgeLoss: wraps Judge as a Loss for the training loop."""
+"""JudgeLoss: wraps JudgeAgent as a Loss for the training loop."""
 
-from autopilot.ai.judge import Judge
+from autopilot.ai.evaluation.judge import JudgeAgent
+from autopilot.ai.gradient import CollationResult, GradientCollator
 from autopilot.core.loss import Loss
-from autopilot.core.models import Datum
 from autopilot.core.parameter import Parameter
+from autopilot.core.types import Datum
 from typing import Any
 
 
 class JudgeLoss(Loss):
-  """Loss that uses a Judge to compute gradients."""
+  """Loss that uses a JudgeAgent and GradientCollator to compute per-parameter gradients."""
 
-  def __init__(self, judge: Judge, parameters: list[Parameter] | None = None) -> None:
+  def __init__(
+    self,
+    judge: JudgeAgent,
+    collator: GradientCollator,
+    parameters: list[Parameter] | None = None,
+  ) -> None:
     super().__init__(parameters)
     self._judge = judge
+    self._collator = collator
     self._accumulated: list[dict[str, Any]] = []
+    self._last_collation: CollationResult | None = None
 
   def forward(self, data: Datum, targets: Any = None) -> None:
     self._accumulated.append(
@@ -26,25 +34,17 @@ class JudgeLoss(Loss):
   def backward(self) -> None:
     if not self._accumulated:
       return
-    feedback = self._build_gradient(self._accumulated)
+    result = self._collator.collate(self._accumulated, self._loss_parameters)
+    self._last_collation = result
     for param in self._loss_parameters:
       if param.requires_grad:
-        param.grad = feedback
-
-  def _build_gradient(self, accumulated: list[dict[str, Any]]) -> str:
-    """Aggregate accumulated batch results into a structured text gradient."""
-    parts = []
-    for entry in accumulated:
-      data = entry['data']
-      if data.feedback:
-        parts.append(data.feedback)
-      if data.error_message:
-        parts.append(f'error: {data.error_message}')
-    return '\n'.join(parts) if parts else 'no feedback'
+        grad = result.gradients.get(param.id)
+        if grad is not None:
+          param.grad = grad
 
   @property
-  def gradients(self) -> list[dict[str, Any]]:
-    return list(self._accumulated)
+  def gradients(self) -> CollationResult | None:
+    return self._last_collation
 
   def reset(self) -> None:
     self._accumulated = []

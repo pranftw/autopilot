@@ -1,8 +1,8 @@
-{"item_id": "q1", "question": "What is the capital of France?", "expected": "Paris"}
-{"item_id": "q2", "question": "What is the largest planet in our solar system?", "expected": "Jupiter"}
-{"item_id": "q3", "question": "Who wrote Romeo and Juliet?", "expected": "William Shakespeare"}
-{"item_id": "q4", "question": "What is the chemical symbol for water?", "expected": "H2O"}
-{"item_id": "q5", "question": "What year did World War II end?", "expected": "1945"}
-{"item_id": "q6", "question": "What is the speed of light in km/s?", "expected": "299792"}
-{"item_id": "q7", "question": "What is the smallest prime number?", "expected": "2"}
-{"item_id": "q8", "question": "What element has atomic number 79?", "expected": "Gold"}
+{"question": "What is the capital of France?", "expected": "Paris", "metadata": {"label": "q1"}}
+{"question": "What is the largest planet in our solar system?", "expected": "Jupiter", "metadata": {"label": "q2"}}
+{"question": "Who wrote Romeo and Juliet?", "expected": "William Shakespeare", "metadata": {"label": "q3"}}
+{"question": "What is the chemical symbol for water?", "expected": "H2O", "metadata": {"label": "q4"}}
+{"question": "What year did World War II end?", "expected": "1945", "metadata": {"label": "q5"}}
+{"question": "What is the speed of light in km/s?", "expected": "299792", "metadata": {"label": "q6"}}
+{"question": "What is the smallest prime number?", "expected": "2", "metadata": {"label": "q7"}}
+{"question": "What element has atomic number 79?", "expected": "Gold", "metadata": {"label": "q8"}}

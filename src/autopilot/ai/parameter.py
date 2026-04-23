@@ -3,8 +3,8 @@
 Declares which files/directories the optimizer is allowed to modify.
 """
 
-from autopilot.core.models import Datum
 from autopilot.core.parameter import Parameter
+from autopilot.core.types import Datum
 from pathlib import Path
 from typing import Any
 
@@ -24,12 +24,12 @@ class PathParameter(Parameter):
         self.config = PathParameter(source='~/project/config', pattern='*.tf')
   """
 
-  source: str = ''
+  source: str
   pattern: str = '**/*'
 
   def __init__(
     self,
-    source: str = '',
+    source: str,
     pattern: str = '**/*',
     **kwargs: Any,
   ) -> None:
@@ -46,6 +46,30 @@ class PathParameter(Parameter):
       return [source_path]
     return sorted(source_path.glob(self.pattern))
 
+  def render(self) -> str:
+    files = self.matched_files()
+    if not files:
+      return ''
+    parts = [f'Editable files ({self.source}):']
+    for f in files[:20]:
+      parts.append(f'  - {f}')
+    return '\n'.join(parts)
+
+  def snapshot(self) -> dict[str, str]:
+    result: dict[str, str] = {}
+    root = Path(self.source)
+    for f in self.matched_files():
+      key = str(f.relative_to(root))
+      result[key] = f.read_text(encoding='utf-8')
+    return result
+
+  def restore(self, content: dict[str, str]) -> None:
+    root = Path(self.source)
+    for rel_path, text in content.items():
+      target = root / rel_path
+      target.parent.mkdir(parents=True, exist_ok=True)
+      target.write_text(text, encoding='utf-8')
+
   def to_dict(self) -> dict[str, Any]:
     d = super().to_dict()
     d['source'] = self.source
@@ -55,6 +79,7 @@ class PathParameter(Parameter):
   @classmethod
   def from_dict(cls, data: dict[str, Any]) -> 'PathParameter':
     data = dict(data)
+    stored_id = data.pop('id', None)
     source = data.pop('source', '')
     pattern = data.pop('pattern', '**/*')
     requires_grad = data.pop('requires_grad', True)
@@ -62,4 +87,6 @@ class PathParameter(Parameter):
     items = [Datum.from_dict(item) for item in items_raw]
     param = cls(source=source, pattern=pattern, **data, items=items)
     param.requires_grad = requires_grad
+    if stored_id:
+      object.__setattr__(param, '_id', stored_id)
     return param

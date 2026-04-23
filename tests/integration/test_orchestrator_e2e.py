@@ -1,16 +1,19 @@
 """End-to-end integration tests for EpochOrchestrator with full callback stack."""
 
-from autopilot.core.callbacks import Callback
-from autopilot.core.cost_tracker import CostTracker
+from autopilot.core.callbacks.callback import Callback
+from autopilot.core.callbacks.cost import CostTrackerCallback
+from autopilot.core.callbacks.data_recorder import DataRecorderCallback
+from autopilot.core.callbacks.memory import MemoryCallback
+from autopilot.core.checkpoint import JSONCheckpoint
+from autopilot.core.experiment import PromotionExperiment
+from autopilot.core.logger import JSONLogger
+from autopilot.core.loops.orchestrator import EpochOrchestrator, OrchestratorConfig
 from autopilot.core.memory import FileMemory
 from autopilot.core.metric import Metric
-from autopilot.core.models import Datum
 from autopilot.core.module import AutoPilotModule
-from autopilot.core.orchestrator import EpochOrchestrator, OrchestratorConfig
-from autopilot.core.regression import write_best_baseline
-from autopilot.core.stage_callbacks import EpochRecorderCallback, MemoryCallback, RegressionCallback
 from autopilot.core.summary import build_experiment_summary, write_experiment_summary
 from autopilot.core.trainer import Trainer
+from autopilot.core.types import Datum
 from unittest.mock import MagicMock
 import pytest
 
@@ -40,9 +43,11 @@ class IntegrationModule(AutoPilotModule):
 
 
 class IntegrationMetric(Metric):
+  higher_is_better = True
+
   def __init__(self):
     super().__init__()
-    self._vals: list[float] = []
+    self.add_state('_vals', list)
 
   def update(self, datum):
     if isinstance(datum, Datum) and 'accuracy' in datum.metrics:
@@ -53,17 +58,14 @@ class IntegrationMetric(Metric):
       return {'accuracy': 0.0}
     return {'accuracy': sum(self._vals) / len(self._vals)}
 
-  def reset(self):
-    self._vals = []
-
 
 class TestFullLoopHappyPath:
   def test_two_epochs_with_callbacks(self, tmp_path):
     module = IntegrationModule(accuracy_schedule=[0.6, 0.8])
     module.metric = IntegrationMetric()
     memory = FileMemory(tmp_path)
-    cost = CostTracker(tmp_path)
-    recorder = EpochRecorderCallback(tmp_path)
+    cost = CostTrackerCallback(tmp_path)
+    recorder = DataRecorderCallback(tmp_path)
     mem_cb = MemoryCallback(memory)
 
     trainer = Trainer(
@@ -77,15 +79,15 @@ class TestFullLoopHappyPath:
   def test_artifacts_produced(self, tmp_path):
     module = IntegrationModule(accuracy_schedule=[0.7, 0.8])
     module.metric = IntegrationMetric()
-    recorder = EpochRecorderCallback(tmp_path)
-    cost = CostTracker(tmp_path)
+    recorder = DataRecorderCallback(tmp_path)
+    cost = CostTrackerCallback(tmp_path)
 
     trainer = Trainer(
       loop=EpochOrchestrator(),
       callbacks=[recorder, cost],
     )
     trainer.fit(module, train_dataloaders=[1], max_epochs=2)
-    assert (tmp_path / 'epoch_1' / 'epoch_metrics.json').exists()
+    assert (tmp_path / 'epoch_1' / 'data.jsonl').exists()
     assert (tmp_path / 'cost_summary.json').exists()
 
 
@@ -96,13 +98,22 @@ class TestRegressionRollback:
     store = MagicMock()
     config = OrchestratorConfig(auto_rollback=True)
 
-    write_best_baseline(tmp_path, epoch=1, metrics={'accuracy': 0.8})
-    reg_cb = RegressionCallback(tmp_path)
+    experiment = PromotionExperiment(
+      tmp_path,
+      slug='orch-e2e',
+      logger=JSONLogger(tmp_path),
+      checkpoint=JSONCheckpoint(),
+      store=store,
+      threshold_pct=0.0,
+    )
+    experiment.best_baseline_artifact.write(
+      {'epoch': 1, 'metrics': {'accuracy': 0.8}},
+      tmp_path,
+    )
 
     trainer = Trainer(
       loop=EpochOrchestrator(config),
-      store=store,
-      callbacks=[reg_cb],
+      experiment=experiment,
     )
     trainer.fit(
       module,
@@ -117,7 +128,7 @@ class TestPlateauDetection:
   def test_stops_on_plateau(self, tmp_path):
     module = IntegrationModule(accuracy_schedule=[0.8, 0.8, 0.8, 0.8, 0.8])
     module.metric = IntegrationMetric()
-    config = OrchestratorConfig(plateau_window=3, plateau_threshold=0.05)
+    config = OrchestratorConfig(plateau_window=3, plateau_threshold=0.05, monitor='accuracy')
 
     trainer = Trainer(loop=EpochOrchestrator(config))
     result = trainer.fit(module, train_dataloaders=[1], max_epochs=10)
@@ -129,7 +140,7 @@ class TestDryRun:
   def test_no_side_effects(self, tmp_path):
     module = IntegrationModule()
     module.metric = IntegrationMetric()
-    recorder = EpochRecorderCallback(tmp_path)
+    recorder = DataRecorderCallback(tmp_path)
 
     trainer = Trainer(
       loop=EpochOrchestrator(),
@@ -145,7 +156,7 @@ class TestExperimentSummary:
   def test_summary_produced(self, tmp_path):
     module = IntegrationModule(accuracy_schedule=[0.6, 0.8])
     module.metric = IntegrationMetric()
-    cost = CostTracker(tmp_path)
+    cost = CostTrackerCallback(tmp_path)
 
     trainer = Trainer(
       loop=EpochOrchestrator(),

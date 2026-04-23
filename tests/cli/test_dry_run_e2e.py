@@ -1,7 +1,7 @@
 """End-to-end dry-run integration test for the full optimization workflow.
 
 Exercises the walkthrough from the plan:
-  workspace init -> workspace doctor -> dataset validate
+  workspace init -> workspace doctor -> dataset list
   -> experiment create -> optimize loop --dry-run
 Then verifies manifests, events, command logs, results, dataset snapshots,
 runtime override wiring, and records/ boundary.
@@ -9,12 +9,11 @@ runtime override wiring, and records/ boundary.
 
 from autopilot.cli.context import build_context
 from autopilot.cli.main import build_parser
-from autopilot.core.callbacks import Callback
-from autopilot.core.checkpoints import load_checkpoint
+from autopilot.core.callbacks.callback import Callback
 from autopilot.core.hyperparams import load_hyperparams, update_hyperparams
-from autopilot.core.models import Datum
 from autopilot.core.module import Module
 from autopilot.core.trainer import Trainer
+from autopilot.core.types import Datum
 from autopilot.policy.gates import MaxGate, MinGate
 from autopilot.policy.quality_first import QualityFirstMetric, QualityFirstPolicy
 from autopilot.tracking.events import load_events
@@ -119,10 +118,9 @@ class _DryRunModule(Module):
       human_review_on_warn=policy_cfg.get('human_review_on_warn', True),
     )
     self.metric = QualityFirstMetric(gates=gates)
-    self.dataset_profile_config = {'datasets': config.get('datasets', {})}
 
   def forward(self, ctx: dict[str, Any], params: dict[str, Any]) -> Datum:
-    return Datum(success=True, metadata={'dry_run': True, 'command': params.get('command', '')})
+    return Datum(success=True, metadata={'dry_run': True, 'command': params.get('command')})
 
 
 def _build_gates(workflow: dict) -> list:
@@ -156,16 +154,16 @@ def _run_cli(workspace: Path, argv: list[str]) -> None:
   ctx = build_context(parsed)
 
   try:
-    profile = getattr(parsed, 'profile', '') or 'reasoning_v3_ci_staging'
+    profile = parsed.profile if hasattr(parsed, 'profile') else 'reasoning_v3_ci_staging'
     wf_path = paths.root(workspace, ctx.project) / 'workflows' / f'{profile}.toml'
     with open(wf_path, 'rb') as wf_file:
       workflow = tomllib.load(wf_file)
     ctx.module = _DryRunModule(workflow)
     ctx.trainer = build_trainer(workflow, dry_run=ctx.dry_run)
-  except Exception:
+  except (FileNotFoundError, KeyError):
     pass
 
-  handler = getattr(parsed, 'handler', None)
+  handler = parsed.handler
   assert handler is not None, f'no handler for {argv}'
   handler(ctx, parsed)
 
@@ -197,10 +195,7 @@ class TestWorkspaceInit:
     assert (autopilot / 'workflows').exists()
 
 
-class TestDatasetValidate:
-  def test_datasets_validate(self, workspace: Path) -> None:
-    _run_cli(workspace, ['dataset', 'validate'])
-
+class TestDatasetCommands:
   def test_dataset_list(self, workspace: Path) -> None:
     _run_cli(workspace, ['dataset', 'list'])
 
@@ -287,7 +282,7 @@ class TestOptimizeLoopDryRun:
     )
 
     exp_dir = workspace / 'autopilot' / 'experiments' / 'dry-run-exp'
-    checkpoint = load_checkpoint(exp_dir)
+    checkpoint = load_manifest(exp_dir, strict=False)
     assert checkpoint is not None
 
   def test_preflight_dry_run(self, workspace: Path) -> None:
@@ -517,18 +512,6 @@ class TestRecordsBoundary:
     assert (records / 'experiment_index.jsonl').is_file()
 
 
-class TestDatasetSnapshot:
-  def test_snapshot_creation(self, workspace: Path) -> None:
-    """Verify dataset materialization creates a snapshot."""
-    _run_cli(
-      workspace,
-      [
-        'dataset',
-        'materialize',
-      ],
-    )
-
-
 class TestRegressionRemovedFeatures:
   def test_manifest_no_status_field(self) -> None:
     from autopilot.core.models import Manifest
@@ -541,24 +524,19 @@ class TestRegressionRemovedFeatures:
       import autopilot.core.state  # noqa: F401
 
   def test_no_state_transition_error(self) -> None:
-    from autopilot.core import errors
+    import autopilot.core.errors as errors_mod
 
-    assert not hasattr(errors, 'StateTransitionError')
+    assert not hasattr(errors_mod, 'StateTransitionError')
 
-  def test_no_transition_status_in_services(self) -> None:
-    from autopilot.core import services
+  def test_services_module_removed(self) -> None:
+    import importlib.util
 
-    assert not hasattr(services, 'transition_status')
+    assert importlib.util.find_spec('autopilot.core.services') is None
 
-  def test_no_create_experiment_in_services(self) -> None:
-    from autopilot.core import services
+  def test_checkpoints_module_removed(self) -> None:
+    import importlib.util
 
-    assert not hasattr(services, 'create_experiment')
-
-  def test_no_resumable_in_checkpoints(self) -> None:
-    from autopilot.core import checkpoints
-
-    assert not hasattr(checkpoints, 'resumable')
+    assert importlib.util.find_spec('autopilot.core.checkpoints') is None
 
   def test_no_update_manifest_status(self) -> None:
     from autopilot.tracking import manifest
@@ -572,7 +550,7 @@ class TestRegressionRemovedFeatures:
     assert not hasattr(t, 'run')
 
   def test_callback_no_removed_hooks(self) -> None:
-    from autopilot.core.callbacks import Callback
+    from autopilot.core.callbacks.callback import Callback
 
     cb = Callback()
     assert not hasattr(cb, 'on_status_transition')

@@ -1,7 +1,16 @@
 """Canonical I/O primitives for JSON and JSONL operations.
 
-All JSON/JSONL persistence in the framework delegates to these functions.
+All JSON/JSONL persistence in the framework delegates to these four functions.
 No other module should implement atomic writes or JSONL append/read logic.
+New code that needs JSON/JSONL I/O must use these primitives.
+
+Functions:
+  atomic_write_json(path, payload)     -- tmp-write + rename, raises TrackingError
+  append_jsonl(path, record)           -- append one JSON line, creates parent dirs
+  read_jsonl(path, strict=True)        -- read all records, [] if missing
+  read_json(path)                      -- read JSON file, None if missing
+
+JSON format: 2-space indent, sort_keys=False, UTF-8 encoding.
 """
 
 from autopilot.core.errors import TrackingError
@@ -12,7 +21,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def atomic_write_json(path: Path, payload: dict) -> None:
+def atomic_write_json(path: Path, payload: list | dict) -> None:
   """Atomically write a JSON file via tmp-write + rename."""
   path.parent.mkdir(parents=True, exist_ok=True)
   tmp = path.with_suffix(path.suffix + '.tmp')
@@ -75,7 +84,7 @@ def read_jsonl(path: Path, strict: bool = True) -> list[dict]:
   return records
 
 
-def read_json(path: Path) -> dict | None:
+def read_json(path: Path) -> dict | list | None:
   """Read a JSON file. Returns None if file is missing."""
   if not path.is_file():
     return None

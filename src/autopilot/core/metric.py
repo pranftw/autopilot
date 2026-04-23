@@ -4,73 +4,156 @@ Metric extends Module (like torchmetrics.Metric extends nn.Module).
 Metrics assigned as attributes on a Module auto-register into _modules.
 """
 
-from autopilot.core.models import Datum
 from autopilot.core.module import Module
+from autopilot.core.types import Datum
+from copy import deepcopy
 from typing import Any
 
 
 class Metric(Module):
-  """Base metric. Extends Module so it auto-registers as a child module.
+  """torchmetrics-style metric base.
 
-  update() per batch, compute() per epoch, reset() between epochs.
-  forward() calls update() and returns compute() (torchmetrics pattern).
+  Extends Module so it auto-registers as a child module on the parent.
+  Trainer.fit() collects Metric instances from module.named_modules()
+  (excluding Loss) and builds metric_metadata from higher_is_better.
+
+  Extension points:
+    update(datum)  -- accumulate from one batch (must implement)
+    compute()      -- return metric dict from accumulated state (must implement)
+
+  State management:
+    add_state(name, default)  -- register accumulator with reset default
+    reset()                   -- restore all states to defaults (no override needed)
+
+  Class attributes:
+    higher_is_better (bool | None) -- True/False for regression detection,
+                                      None if directionality is unknown
+
+  Auto-wrapping: __init_subclass__ wraps update() to increment _update_count.
+  The update_count property tracks calls since last reset.
+
+  Composition: Metric + Metric -> MetricCollection via __add__.
+  MetricCollection dispatches update/compute/reset to children with
+  optional prefix/postfix namespacing. Raises on key collision.
   """
+
+  higher_is_better: bool | None = None
+
+  def __init_subclass__(cls, **kwargs: Any) -> None:
+    super().__init_subclass__(**kwargs)
+    if 'update' in cls.__dict__:
+      original = cls.__dict__['update']
+
+      def wrapped_update(self, *args, **kw):
+        self._update_count += 1
+        return original(self, *args, **kw)
+
+      cls.update = wrapped_update
 
   def __init__(self) -> None:
     super().__init__()
-    self._state: dict[str, Any] = {}
+    self._defaults: dict[str, Any] = {}
+    self._update_count: int = 0
 
-  def name(self) -> str:
-    return type(self).__name__
+  def add_state(self, name: str, default: Any) -> None:
+    """Register metric state with a default value.
 
-  def forward(self, datum: Datum) -> dict[str, float]:
-    """Call update() then return compute(). Like torchmetrics.Metric.forward()."""
-    self.update(datum)
-    return self.compute()
+    Call in __init__ after super().__init__().
+    default can be a value (int, float) or a callable factory (list, dict).
+    The state is accessible as self.<name> and auto-reset by reset().
+    """
+    self._defaults[name] = default
+    value = default() if callable(default) else default
+    object.__setattr__(self, name, value)
 
   def update(self, datum: Datum) -> None:
+    """Accumulate metric state from one datum/batch. Must override."""
     raise NotImplementedError
 
   def compute(self) -> dict[str, float]:
+    """Compute metric values from accumulated state. Must override."""
     raise NotImplementedError
 
   def reset(self) -> None:
-    self._state = {}
+    """Reset all registered states to defaults. Subclasses should NOT need to override."""
+    self._update_count = 0
+    for name, default in self._defaults.items():
+      value = default() if callable(default) else default
+      object.__setattr__(self, name, value)
 
-  def __add__(self, other: 'Metric') -> 'CompositeMetric':
-    return CompositeMetric([self, other])
+  @property
+  def update_count(self) -> int:
+    """Number of times update() has been called since last reset."""
+    return self._update_count
+
+  def name(self) -> str:
+    """Metric identity for logging keys."""
+    return type(self).__name__
+
+  def clone(self) -> 'Metric':
+    """Deep copy this metric (fresh state, same config)."""
+    return deepcopy(self)
+
+  def __add__(self, other: 'Metric') -> 'MetricCollection':
+    """Compose two metrics into a MetricCollection."""
+    return MetricCollection([self, other])
 
   def __repr__(self) -> str:
     return f'{type(self).__name__}()'
 
 
-class CompositeMetric(Metric):
-  """Multiple metrics composed via __add__."""
+class MetricCollection(Metric):
+  """Named collection of metrics with prefix/postfix namespacing.
 
-  def __init__(self, metrics: list['Metric']) -> None:
+  Like torchmetrics.MetricCollection: accepts dict or list of metrics,
+  dispatches update/compute/reset to children, raises on key collision.
+  """
+
+  higher_is_better: bool | None = None
+
+  def __init__(
+    self,
+    metrics: 'dict[str, Metric] | list[Metric]',
+    prefix: str | None = None,
+    postfix: str | None = None,
+  ) -> None:
     super().__init__()
-    self._parts = list(metrics)
-    for i, m in enumerate(self._parts):
-      setattr(self, f'metric_{i}', m)
-
-  def forward(self, datum: Datum) -> dict[str, float]:
-    self.update(datum)
-    return self.compute()
+    if isinstance(metrics, list):
+      names = [m.name() for m in metrics]
+      if len(names) != len(set(names)):
+        raise ValueError(f'duplicate metric names: {names}')
+      metrics = dict(zip(names, metrics, strict=True))
+    self._prefix = prefix
+    self._postfix = postfix
+    self._metric_keys: list[str] = list(metrics.keys())
+    for key, m in metrics.items():
+      setattr(self, key, m)
 
   def update(self, datum: Datum) -> None:
-    for m in self._parts:
-      m.update(datum)
+    for key in self._metric_keys:
+      getattr(self, key).update(datum)
 
   def compute(self) -> dict[str, float]:
     result: dict[str, float] = {}
-    for m in self._parts:
-      result.update(m.compute())
+    for key in self._metric_keys:
+      m = getattr(self, key)
+      for mk, mv in m.compute().items():
+        full_key = f'{self._prefix or ""}{mk}{self._postfix or ""}'
+        if full_key in result:
+          raise ValueError(f'metric key collision: {full_key!r}')
+        result[full_key] = mv
     return result
 
   def reset(self) -> None:
-    for m in self._parts:
-      m.reset()
+    super().reset()
+    for key in self._metric_keys:
+      getattr(self, key).reset()
+
+  def clone(self) -> 'MetricCollection':
+    return deepcopy(self)
 
   def __repr__(self) -> str:
-    names = ', '.join(type(m).__name__ for m in self._parts)
-    return f'CompositeMetric([{names}])'
+    names = ', '.join(self._metric_keys)
+    pre = f'prefix={self._prefix!r}, ' if self._prefix else ''
+    post = f'postfix={self._postfix!r}, ' if self._postfix else ''
+    return f'MetricCollection({pre}{post}[{names}])'

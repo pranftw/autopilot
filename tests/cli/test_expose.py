@@ -7,7 +7,7 @@ import json
 
 class TestExposeRecord:
   def test_to_dict(self):
-    r = ExposeRecord(description='test', command='echo hi', exit_code=0, duration_s=1.5)
+    r = ExposeRecord(command='echo hi', description='test', exit_code=0, duration_s=1.5)
     d = r.to_dict()
     assert d['description'] == 'test'
     assert d['command'] == 'echo hi'
@@ -21,7 +21,7 @@ class TestExposeRecord:
     assert r.stderr == 'err'
 
   def test_timestamp_auto(self):
-    r = ExposeRecord(description='test')
+    r = ExposeRecord(command='noop', description='test')
     assert r.timestamp != ''
 
 

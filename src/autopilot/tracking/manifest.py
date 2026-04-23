@@ -1,4 +1,9 @@
-"""Canonical load/save for experiment manifests."""
+"""Canonical load/save for experiment manifests.
+
+Atomic write protocol: serialize to JSON, write to manifest.json.tmp,
+atomic replace via tmp.replace(path). On serialization failure: delete tmp,
+raise TrackingError. Never write manifest non-atomically.
+"""
 
 from autopilot.core.errors import TrackingError
 from autopilot.core.models import Manifest
@@ -11,10 +16,17 @@ def _manifest_path(experiment_dir: Path) -> Path:
   return experiment_dir / 'manifest.json'
 
 
-def load_manifest(experiment_dir: Path) -> Manifest:
+def load_manifest(experiment_dir: Path, *, strict: bool = True) -> Manifest | None:
+  """Load manifest from experiment directory.
+
+  When strict=True (default), raises TrackingError if manifest is missing.
+  When strict=False, returns None on missing manifest.
+  """
   path = _manifest_path(experiment_dir)
   if not path.is_file():
-    raise TrackingError(f'manifest not found: {path}')
+    if strict:
+      raise TrackingError(f'manifest not found: {path}')
+    return None
   try:
     raw = path.read_text(encoding='utf-8')
     data = json.loads(raw)

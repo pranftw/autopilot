@@ -1,5 +1,5 @@
-{"item_id": "test_1", "text": "Can I get a refund for my subscription?", "expected_category": "billing"}
-{"item_id": "test_2", "text": "The mobile app crashes when I open settings", "expected_category": "technical"}
-{"item_id": "test_3", "text": "What is your return policy?", "expected_category": "general"}
-{"item_id": "test_4", "text": "I want to delete my account permanently", "expected_category": "account"}
-{"item_id": "test_5", "text": "Is express shipping available internationally?", "expected_category": "shipping"}
+{"text": "Can I get a refund for my subscription?", "expected_category": "billing", "metadata": {"label": "test_1"}}
+{"text": "The mobile app crashes when I open settings", "expected_category": "technical", "metadata": {"label": "test_2"}}
+{"text": "What is your return policy?", "expected_category": "general", "metadata": {"label": "test_3"}}
+{"text": "I want to delete my account permanently", "expected_category": "account", "metadata": {"label": "test_4"}}
+{"text": "Is express shipping available internationally?", "expected_category": "shipping", "metadata": {"label": "test_5"}}

@@ -34,11 +34,14 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = [
+  "B009",
+  "B010",
   "E",
   "E402",
   "F",
   "I",
   "Q",
+  "S110",
   "W191",
   "TID",
 ]
@@ -61,3 +64,5 @@ indent-style = 'space'
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["tests"]
+addopts = ["--import-mode=importlib"]

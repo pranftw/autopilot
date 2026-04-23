@@ -1,6 +1,7 @@
 """Tests for the Gate class hierarchy."""
 
-from autopilot.core.models import GateResult, Result
+from autopilot.core.models import Result
+from autopilot.core.types import GateResult
 from autopilot.policy.gates import CustomGate, Gate, MaxGate, MinGate, RangeGate
 import pytest
 
@@ -62,25 +63,25 @@ class TestCustomGate:
 
 
 class TestMissingMetric:
-  def test_min_gate_skip_when_metric_missing(self) -> None:
+  def test_min_gate_fail_when_metric_missing(self) -> None:
     gate = MinGate('accuracy', 0.8)
     sc = Result(metrics={})
-    assert gate.forward(sc) == GateResult.SKIP
+    assert gate.forward(sc) == GateResult.FAIL
 
-  def test_max_gate_skip_when_metric_missing(self) -> None:
+  def test_max_gate_fail_when_metric_missing(self) -> None:
     gate = MaxGate('loss', 1.0)
     sc = Result(metrics={'other': 1.0})
-    assert gate.forward(sc) == GateResult.SKIP
+    assert gate.forward(sc) == GateResult.FAIL
 
-  def test_range_gate_skip_when_metric_missing(self) -> None:
+  def test_range_gate_fail_when_metric_missing(self) -> None:
     gate = RangeGate('score', 0.0, 1.0)
     sc = Result(metrics={})
-    assert gate.forward(sc) == GateResult.SKIP
+    assert gate.forward(sc) == GateResult.FAIL
 
-  def test_custom_gate_skip_when_metric_missing(self) -> None:
+  def test_custom_gate_fail_when_metric_missing(self) -> None:
     gate = CustomGate('x', lambda v: True)
     sc = Result(metrics={})
-    assert gate.forward(sc) == GateResult.SKIP
+    assert gate.forward(sc) == GateResult.FAIL
 
 
 class TestGateCallAndExplain:

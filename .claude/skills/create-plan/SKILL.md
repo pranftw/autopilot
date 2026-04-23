@@ -53,11 +53,11 @@ All tooling is primarily used by agents. Every design decision from the agent's 
 ## DRY -- reuse existing implementations
 
 One canonical implementation per concern. Reuse:
-- `_atomic_write_json` from `tracking.manifest`
-- `Event` + `create_event` / `append_event` from `tracking.events`
-- `Datum`, `Result`, `Manifest` from `core.models`
+- `atomic_write_json`, `append_jsonl`, `read_jsonl`, `read_json` from `tracking.io`
+- `Event` + `create_event` / `append_event` from `tracking.events` (delegates to `tracking.io`)
+- `Datum` from `core.types`, `Result` and `Manifest` from `core.models`
 - `Output` class with `result()`, `info()`, `table()` from `cli.output`
-- `make_subparser` from `cli.shared` (used internally by `Command.register()` in `cli/command.py`)
+- `make_subparser` from `cli.resolvers` (used internally by `Command.register()` in `cli/command.py`)
 
 Don't create parallel tracking, storage, or output systems.
 
@@ -128,6 +128,11 @@ uv run ruff check src/                           # lint clean
 
 Check referenced paths exist, functions have expected signatures.
 
+## Policy directives
+
+- **No backward compatibility.** All renames, removals, and API changes are clean breaks. No aliases, no deprecation shims, no fallback imports. Every consumer (library, tests, examples, docs, skills) is updated in the same plan.
+- **Thorough and comprehensive testing.** Every subplan must include tests covering: normal paths, edge cases, error conditions, round-trips, subclass-override scenarios, and integration flows. Tests are written alongside the code, not as an afterthought. All existing tests must be updated for any rename or API change.
+
 ## Code quality rules
 
 - No defensive programming, needless fallbacks, or bloat
@@ -161,14 +166,38 @@ When planning features that involve LLM operations:
 - **Extension points via protocols**: Define `Protocol` classes for structural typing alongside base classes with shared defaults.
 - **Base vs overlay split**: Universal fields in base models (`DataItem`: id, turns, split). Everything project-specific goes in `custom: T` generic field.
 
-## Documentation checklist (mandatory)
+## Documentation updates are per-subplan, not a separate pass
 
-Every new feature MUST update all of these before the plan is considered complete:
+Every subplan that changes a public API must update the affected class/module docstrings in the same subplan. All code-knowledge documentation (contracts, extension points, gotchas, invariants) lives in source docstrings, not in external skill files or concept docs. Project-level meta-docs (CLAUDE.md, README.md, PHILOSOPHY.md) still exist for agent guidance, project structure, and design philosophy -- update those when structural changes affect them.
 
-- **Base engine README** -- commands table, feature list
-- **Overlay README** -- backend table, key commands, skills reference
-- **Relevant skill SKILL.md** -- agent instructions with exact commands and JSON result shapes
-- **New skill** -- if the feature introduces a distinct domain not covered by existing skills
-- **CLAUDE.md** -- if the feature introduces new conventions, boundaries, or module layout changes
+### What to update (check every item for each subplan)
 
-Stale docs and skills are worse than none. If you change a protocol, command, or public constructor surface, update every skill that references it.
+For **every** subplan, scan this list and update anything affected:
+
+1. **Source docstrings** -- the class or module docstring in the file you changed IS the documentation. If you change a constructor signature, add a method, or change behavior, update the docstring in the same subplan.
+2. **CLAUDE.md** (symlinked to AGENTS.md) -- extension model bullets, configuration invariants, key files list, prohibited anti-patterns. If you add a class, change a convention, or add a key file, update CLAUDE.md.
+3. **README.md** -- code examples, package layout, component mapping table. If an example would break with your change, fix it now.
+4. **PHILOSOPHY.md** -- if the feature introduces a new design principle or changes how an existing principle applies.
+
+### How to enforce this in the plan
+
+Each subplan's task list must include a **"Docs"** line item that names the specific files to update. Example:
+
+```
+## Subplan 3: Add FooCallback
+
+1. Implement FooCallback in core/callbacks/stage.py
+2. Wire into optimize loop defaults
+3. Tests: test_foo_callback.py
+4. Docs: FooCallback docstring (contract + hooks), CLAUDE.md (stage callbacks bullet)
+```
+
+If a subplan changes nothing public, the Docs line says "None (internal only)". But it must be present -- the absence of a Docs line is a plan defect.
+
+### Verification at subplan close
+
+After each subplan passes tests and lint, verify that the class docstring reflects the new behavior. If a docstring still describes the old behavior, the subplan is not done.
+
+### Stale docs are bugs
+
+Stale docstrings are worse than none. They cause agents to follow outdated patterns and generate code that doesn't work. Treat a stale docstring the same way you'd treat a failing test -- fix it before moving on.

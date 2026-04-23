@@ -7,12 +7,9 @@ from autopilot.cli.command import Argument, Command, subcommand
 from autopilot.cli.context import CLIContext
 from autopilot.core.checkpoint import JSONCheckpoint
 from autopilot.core.config import resolve_experiment_dir
-from autopilot.core.experiment import Experiment
+from autopilot.core.experiment import PromotionExperiment
 from autopilot.core.logger import JSONLogger
-from autopilot.core.models import Promotion
-from autopilot.core.normalization import save_promotion
 from autopilot.tracking.manifest import load_manifest
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import argparse
@@ -21,13 +18,15 @@ import argparse
 class PromoteExecute(Command):
   name = 'execute'
   help = 'Execute promotion'
-  reason = Argument('--reason', default='', help='promotion reason')
-  reviewer = Argument('--reviewer', default='', help='reviewer name')
+  reason = Argument('--reason', default=None, help='promotion reason')
+  reviewer = Argument('--reviewer', default=None, help='reviewer name')
 
   def forward(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Execute the promotion, updating the experiment decision."""
     slug = ctx.experiment
     if not slug:
-      raise ValueError('experiment slug required (--experiment)')
+      ctx.output.error('experiment slug required (--experiment)')
+      return
     exp_dir = resolve_experiment_dir(ctx.workspace, slug)
 
     if ctx.dry_run:
@@ -36,7 +35,7 @@ class PromoteExecute(Command):
       ctx.output.result({**check, 'applied': False})
       return
 
-    experiment = Experiment(
+    experiment = PromotionExperiment(
       exp_dir,
       slug=slug,
       logger=JSONLogger(exp_dir),
@@ -55,14 +54,6 @@ class PromoteExecute(Command):
 
     reason = args.reason or 'promoted via CLI'
     reviewer = args.reviewer or 'operator'
-
-    promotion = Promotion(
-      timestamp=datetime.now(timezone.utc).isoformat(),
-      decision='promoted',
-      reason=reason,
-      reviewer=reviewer,
-    )
-    save_promotion(exp_dir, promotion.to_dict())
     experiment.promote(reason, reviewer=reviewer)
 
     ctx.output.info(f'Experiment {slug!r} promoted.')
@@ -86,9 +77,11 @@ class PromoteCommand(Command):
 
   @subcommand('plan', help='Show what promotion would do')
   def plan(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Show what promotion would do without applying it."""
     slug = ctx.experiment
     if not slug:
-      raise ValueError('experiment slug required (--experiment)')
+      ctx.output.error('experiment slug required (--experiment)')
+      return
     exp_dir = resolve_experiment_dir(ctx.workspace, slug)
     ctx.output.info('Planning promotion...')
     check = _check_promotable(exp_dir)

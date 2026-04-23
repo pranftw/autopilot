@@ -1,7 +1,14 @@
-"""Tests for proposal I/O helpers."""
+"""Tests for proposal I/O helpers and data models."""
 
-from autopilot.core.proposal import read_proposals, read_verdict, record_proposal, record_verdict
-from autopilot.core.stage_models import ChangeProposal, ProposalVerdict
+from autopilot.core.proposal import (
+  ChangeProposal,
+  JudgeValidation,
+  ProposalVerdict,
+  read_proposals,
+  read_verdict,
+  record_proposal,
+  record_verdict,
+)
 
 
 class TestProposalIO:
@@ -44,3 +51,42 @@ class TestProposalIO:
     record_proposal(tmp_path, ChangeProposal(proposal_id='p2'))
     proposals = read_proposals(tmp_path)
     assert len(proposals) == 2
+
+
+class TestProposalVerdictRoundTrip:
+  def test_round_trip(self):
+    v = ProposalVerdict(proposal_id='p1', items_tested=10, items_fixed=3, verdict='fix_confirmed')
+    d = v.to_dict()
+    v2 = ProposalVerdict.from_dict(d)
+    assert v2.proposal_id == 'p1'
+    assert v2.verdict == 'fix_confirmed'
+
+
+class TestChangeProposalRoundTrip:
+  def test_round_trip_without_verification(self):
+    p = ChangeProposal(proposal_id='p1', hypothesis='test', epoch=1)
+    d = p.to_dict()
+    p2 = ChangeProposal.from_dict(d)
+    assert p2.proposal_id == 'p1'
+    assert p2.verification is None
+
+  def test_round_trip_with_verification(self):
+    v = ProposalVerdict(proposal_id='p1', verdict='fix_confirmed')
+    p = ChangeProposal(proposal_id='p1', verification=v)
+    d = p.to_dict()
+    p2 = ChangeProposal.from_dict(d)
+    assert p2.verification is not None
+    assert p2.verification.verdict == 'fix_confirmed'
+
+  def test_timestamp_auto(self):
+    p = ChangeProposal(proposal_id='p1')
+    assert p.timestamp != ''
+
+
+class TestJudgeValidationRoundTrip:
+  def test_round_trip(self):
+    j = JudgeValidation(judge_id='j1', agreement_rate=0.95, confidence='high')
+    d = j.to_dict()
+    j2 = JudgeValidation.from_dict(d)
+    assert j2.judge_id == 'j1'
+    assert j2.confidence == 'high'

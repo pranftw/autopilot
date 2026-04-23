@@ -1,15 +1,16 @@
 """Integration tests for Trainer with Loss, Optimizer, metrics, and DataModule."""
 
-from autopilot.core.callbacks import Callback
+from autopilot.core.callbacks.callback import Callback
 from autopilot.core.loss import Loss
 from autopilot.core.metric import Metric
-from autopilot.core.models import Datum
 from autopilot.core.module import AutoPilotModule
 from autopilot.core.optimizer import Optimizer
 from autopilot.core.parameter import Parameter
 from autopilot.core.trainer import Trainer
+from autopilot.core.types import Datum
 from autopilot.data.dataloader import DataLoader
 from autopilot.data.datamodule import DataModule
+from helpers import NumericGradient
 
 
 class _TrackingLoss(Loss):
@@ -26,7 +27,7 @@ class _TrackingLoss(Loss):
     self.backward_calls += 1
     for p in self._loss_parameters:
       if p.requires_grad:
-        p.grad = 'feedback'
+        p.grad = NumericGradient(value=1.0)
 
   def reset(self):
     self.reset_calls += 1
@@ -49,16 +50,13 @@ class _TrackingOptimizer(Optimizer):
 class _CountMetric(Metric):
   def __init__(self):
     super().__init__()
-    self._n = 0
+    self.add_state('_n', 0)
 
   def update(self, datum):
     self._n += 1
 
   def compute(self):
     return {'count': float(self._n)}
-
-  def reset(self):
-    self._n = 0
 
 
 class _TrainModule(AutoPilotModule):

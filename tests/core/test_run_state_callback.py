@@ -1,7 +1,7 @@
 """Tests for RunStateCallback."""
 
+from autopilot.core.callbacks.run_state import RunStateCallback
 from autopilot.core.models import Result
-from autopilot.core.stage_callbacks import RunStateCallback
 from autopilot.tracking.io import read_json
 from unittest.mock import MagicMock
 
@@ -50,3 +50,14 @@ class TestRunStateCallback:
 
     state = read_json(tmp_path / 'run_state.json')
     assert state['epoch'] == 2
+
+  def test_artifact_registration(self, tmp_path):
+    cb = RunStateCallback(tmp_path)
+    assert 'run_state_artifact' in cb.artifacts
+
+  def test_write_read_round_trip(self, tmp_path):
+    cb = RunStateCallback(tmp_path)
+    cb.on_epoch_end(trainer=MagicMock(), epoch=5, result=None)
+    data = cb.run_state_artifact.read(tmp_path)
+    assert data['epoch'] == 5
+    assert data['status'] == 'running'

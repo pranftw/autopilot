@@ -1,9 +1,11 @@
 """Tests for StreamingDataset."""
 
-from autopilot.ai.models import ConversationTurn, DataItem
+from autopilot.ai.evaluation.schemas import ConversationTurn, DataItem
+from autopilot.core.types import Datum
 from autopilot.data.dataloader import DataLoader
 from autopilot.data.dataset import IterableDataset, StreamingDataset
 from pydantic import BaseModel
+from typing import Any
 
 
 class _Custom(BaseModel):
@@ -47,13 +49,20 @@ def test_streaming_is_iterable_dataset(tmp_path):
   assert len(result) == 2
 
 
+def _pydantic_collate(batch: list[Any]) -> Datum:
+  items = [Datum(metadata={'raw': item}) for item in batch]
+  if len(items) == 1:
+    return items[0]
+  return Datum(items=items)
+
+
 def test_streaming_with_dataloader(tmp_path):
   path = tmp_path / 'data.jsonl'
   items = [_make_item(f'i{i}', i) for i in range(6)]
   _write_items(path, items)
 
   ds = StreamingDataset(path, DataItem[_Custom])
-  loader = DataLoader(ds, batch_size=2)
+  loader = DataLoader(ds, batch_size=2, collate_fn=_pydantic_collate)
   batches = list(loader)
   assert len(batches) == 3
 

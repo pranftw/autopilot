@@ -1,16 +1,18 @@
 """End-to-end Trainer run with all major components."""
 
-from autopilot.core.callbacks import Callback
+from autopilot.core.callbacks.callback import Callback
 from autopilot.core.loss import Loss
 from autopilot.core.metric import Metric
-from autopilot.core.models import Datum, GateResult, Result
+from autopilot.core.models import Result
 from autopilot.core.module import AutoPilotModule
 from autopilot.core.optimizer import Optimizer
 from autopilot.core.parameter import Parameter
 from autopilot.core.trainer import Trainer
+from autopilot.core.types import Datum, GateResult
 from autopilot.data.dataloader import DataLoader
 from autopilot.data.datamodule import DataModule
 from autopilot.policy.policy import Policy
+from helpers import NumericGradient
 
 
 class _E2ELoss(Loss):
@@ -27,7 +29,7 @@ class _E2ELoss(Loss):
     self.backward_calls += 1
     for p in self._loss_parameters:
       if p.requires_grad:
-        p.grad = 'g'
+        p.grad = NumericGradient(value=1.0)
 
   def reset(self):
     self.reset_calls += 1
@@ -50,16 +52,13 @@ class _E2EOpt(Optimizer):
 class _E2EMetric(Metric):
   def __init__(self):
     super().__init__()
-    self._n = 0
+    self.add_state('_n', 0)
 
   def update(self, datum):
     self._n += 1
 
   def compute(self):
     return {'n': float(self._n)}
-
-  def reset(self):
-    self._n = 0
 
 
 class _E2EModule(AutoPilotModule):
@@ -101,6 +100,26 @@ class _E2EStore:
     self.checkouts.append(epoch)
 
 
+class _E2EExperiment:
+  def __init__(self, store=None):
+    self.store = store
+    self.should_rollback = False
+    self.best_epoch = 0
+
+  def rollback(self, to_epoch):
+    if self.store:
+      self.store.checkout(to_epoch)
+
+  def on_epoch_complete(self, epoch, train_metrics):
+    pass
+
+  def on_validation_complete(self, epoch, val_metrics, metric_metadata=None):
+    pass
+
+  def on_loop_complete(self, loop_result):
+    pass
+
+
 class _E2ECallback(Callback):
   def __init__(self):
     self.calls: list[str] = []
@@ -132,10 +151,11 @@ def test_full_stack_two_epochs_accumulate_two():
   store = _E2EStore()
   cb = _E2ECallback()
   dm = _E2EDataModule()
+  experiment = _E2EExperiment(store=store)
   trainer = Trainer(
     callbacks=[cb],
     policy=pol,
-    store=store,
+    experiment=experiment,
     accumulate_grad_batches=2,
   )
   out = trainer.fit(mod, datamodule=dm, max_epochs=2)

@@ -9,44 +9,31 @@ Checkpoint -> JSONCheckpoint.
 """
 
 from autopilot.core.parameter import Parameter
+from autopilot.core.serialization import DictMixin
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 
 @dataclass
-class FileEntry:
+class FileEntry(DictMixin):
   """Single file in a snapshot: content hash, size, and mtime."""
 
   hash: str
   size: int
   mtime: float
 
-  def to_dict(self) -> dict[str, Any]:
-    return {'hash': self.hash, 'size': self.size, 'mtime': self.mtime}
-
-  @classmethod
-  def from_dict(cls, data: dict[str, Any]) -> 'FileEntry':
-    return cls(hash=data['hash'], size=data['size'], mtime=data['mtime'])
-
 
 @dataclass
-class SnapshotManifest:
+class SnapshotManifest(DictMixin):
   """Snapshot of all parameter files at a given epoch.
 
-  entries maps 'param_name::relative_path' to FileEntry.
+  entries maps 'param_name/state_key' to FileEntry.
   """
 
   epoch: int
   timestamp: str
   entries: dict[str, FileEntry] = field(default_factory=dict)
-
-  def to_dict(self) -> dict[str, Any]:
-    return {
-      'epoch': self.epoch,
-      'timestamp': self.timestamp,
-      'entries': {k: v.to_dict() for k, v in self.entries.items()},
-    }
 
   @classmethod
   def from_dict(cls, data: dict[str, Any]) -> 'SnapshotManifest':
@@ -55,31 +42,18 @@ class SnapshotManifest:
 
 
 @dataclass
-class DiffEntry:
+class DiffEntry(DictMixin):
   """Single file change between two snapshots."""
 
   path: str
   status: str
   old_hash: str | None = None
   new_hash: str | None = None
-  text_diff: str = ''
-
-  def to_dict(self) -> dict[str, Any]:
-    return {
-      'path': self.path,
-      'status': self.status,
-      'old_hash': self.old_hash,
-      'new_hash': self.new_hash,
-      'text_diff': self.text_diff,
-    }
-
-  @classmethod
-  def from_dict(cls, data: dict[str, Any]) -> 'DiffEntry':
-    return cls(**data)
+  text_diff: str | None = None
 
 
 @dataclass
-class DiffResult:
+class DiffResult(DictMixin):
   """Diff between two snapshots: list of per-file changes."""
 
   entries: list[DiffEntry] = field(default_factory=list)
@@ -93,9 +67,6 @@ class DiffResult:
   def deleted(self) -> list[DiffEntry]:
     return [e for e in self.entries if e.status == 'deleted']
 
-  def to_dict(self) -> dict[str, Any]:
-    return {'entries': [e.to_dict() for e in self.entries]}
-
   @classmethod
   def from_dict(cls, data: dict[str, Any]) -> 'DiffResult':
     entries = [DiffEntry.from_dict(e) for e in data.get('entries', [])]
@@ -103,19 +74,12 @@ class DiffResult:
 
 
 @dataclass
-class MergeResult:
+class MergeResult(DictMixin):
   """Result of a three-way merge."""
 
   merged: bool
   conflicts: list[str] = field(default_factory=list)
   merged_snapshot: SnapshotManifest | None = None
-
-  def to_dict(self) -> dict[str, Any]:
-    return {
-      'merged': self.merged,
-      'conflicts': self.conflicts,
-      'merged_snapshot': self.merged_snapshot.to_dict() if self.merged_snapshot else None,
-    }
 
   @classmethod
   def from_dict(cls, data: dict[str, Any]) -> 'MergeResult':
@@ -128,22 +92,15 @@ class MergeResult:
 
 
 @dataclass
-class StatusEntry:
+class StatusEntry(DictMixin):
   """Single file status relative to a snapshot."""
 
   path: str
   status: str
 
-  def to_dict(self) -> dict[str, Any]:
-    return {'path': self.path, 'status': self.status}
-
-  @classmethod
-  def from_dict(cls, data: dict[str, Any]) -> 'StatusEntry':
-    return cls(**data)
-
 
 @dataclass
-class StatusResult:
+class StatusResult(DictMixin):
   """Status of all tracked files relative to a snapshot."""
 
   entries: list[StatusEntry] = field(default_factory=list)
@@ -160,9 +117,6 @@ class StatusResult:
   def unchanged(self) -> list[StatusEntry]:
     return [e for e in self.entries if e.status == 'unchanged']
 
-  def to_dict(self) -> dict[str, Any]:
-    return {'entries': [e.to_dict() for e in self.entries]}
-
   @classmethod
   def from_dict(cls, data: dict[str, Any]) -> 'StatusResult':
     entries = [StatusEntry.from_dict(e) for e in data.get('entries', [])]
@@ -170,29 +124,40 @@ class StatusResult:
 
 
 @dataclass
-class SnapshotEntry:
+class SnapshotEntry(DictMixin):
   """Summary of a snapshot for log output."""
 
   epoch: int
   timestamp: str
   file_count: int
 
-  def to_dict(self) -> dict[str, Any]:
-    return {'epoch': self.epoch, 'timestamp': self.timestamp, 'file_count': self.file_count}
-
-  @classmethod
-  def from_dict(cls, data: dict[str, Any]) -> 'SnapshotEntry':
-    return cls(**data)
-
 
 class Store:
   """Abstract base class for content-addressed code versioning.
 
+  Experiment slugs are branches. Epochs are commits. One instance per slug.
+
   Idempotent constructor: if slug exists, loads existing state.
   If slug is new, scans parameters and writes epoch_0 baseline.
-  Like Experiment.__init__.
 
-  Subclass and override all methods for custom backends.
+  Operations (all git-analogous):
+    snapshot(epoch)                        -- capture current state (git commit)
+    checkout(epoch)                        -- restore to snapshot (git checkout)
+    diff(epoch_a, slug_b, epoch_b)         -- compare snapshots (git diff)
+    branch(new_slug, from_epoch)           -- fork into new slug (git checkout -b)
+    merge(from_slug, from_epoch)           -- three-way merge (git merge)
+    log()                                  -- snapshot history (git log)
+    status()                               -- current vs latest snapshot (git status)
+    promote(epoch)                         -- update baseline (merge to main)
+
+  Sequential epoch invariant: snapshot epochs must be self.epoch + 1.
+  Out-of-order snapshots raise StoreError.
+
+  Parameter decoupling: Store interacts with parameters exclusively through
+  param.snapshot() / param.restore(). It never imports concrete parameter types
+  and never probes for domain-specific attributes.
+
+  Built-in subclass: FileStore (ai/store.py) with SHA-256 content addressing.
   """
 
   def __init__(self, path: Path, slug: str, parameters: list[Parameter]) -> None:

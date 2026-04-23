@@ -3,10 +3,21 @@
 Node records a Module.__call__ invocation. Graph is an explicit DAG of Nodes.
 backward() traverses via dependency-counting (PyTorch engine algorithm).
 no_grad()/enable_grad() control recording via ContextVar (graph ON by default).
+
+Key classes:
+  Graph              -- explicit DAG container. record() adds nodes, backward() traverses.
+  Node               -- single Module.__call__ record with hooks and next_functions.
+  AccumulateGrad     -- leaf node for Parameters. Calls param.grad.accumulate().
+  RemovableHandle    -- hook registration handle with remove().
+  no_grad/enable_grad -- context managers for recording control.
+
+Module.__call__ records to the graph automatically when grad mode is enabled.
+_collect_input_nodes extracts grad_fn from Datum args; _create_gradient_edge
+attaches the producer Node to output Datum.
 """
 
-from autopilot.core.models import Datum
 from autopilot.core.parameter import Parameter
+from autopilot.core.types import Datum
 from collections import OrderedDict
 from contextvars import ContextVar
 from typing import Any, Iterator
@@ -149,7 +160,7 @@ class AccumulateGrad(Node):
       if self._parameter.grad is None:
         self._parameter.grad = grads[0]
       else:
-        self._parameter.grad = self._parameter.grad + grads[0]
+        self._parameter.grad = self._parameter.grad.accumulate(grads[0])
     return ()
 
 

@@ -1,6 +1,6 @@
 """Stratified splitting and slot planning."""
 
-from autopilot.ai.models import DataItem, VarDef
+from autopilot.ai.evaluation.schemas import DataItem, VarDef
 from autopilot.data.dataset import ListDataset
 from pydantic import BaseModel
 from typing import Callable, TypeVar

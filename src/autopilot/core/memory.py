@@ -2,15 +2,77 @@
 
 Persistent learning memory across optimization epochs.
 Like Logger and Checkpoint, Memory is a framework extension point.
+
+Data models: MemoryRecord, TrendResult, MemoryContext, BlockedStrategy.
 """
 
 from autopilot.core.errors import TrackingError
-from autopilot.core.stage_models import BlockedStrategy, MemoryContext, MemoryRecord, TrendResult
-from autopilot.tracking.io import append_jsonl, read_json, read_jsonl
+from autopilot.core.serialization import DictMixin
+from autopilot.tracking.io import append_jsonl, atomic_write_json, read_json, read_jsonl
+from dataclasses import dataclass, field, fields
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-import json
 import logging
+
+
+@dataclass
+class MemoryRecord(DictMixin):
+  """Unit of storage for Memory. All fields typed and queryable."""
+
+  epoch: int = 0
+  outcome: str | None = None
+  content: str | None = None
+  category: str | None = None
+  node: str | None = None
+  strategy: str | None = None
+  metrics: dict[str, float] = field(default_factory=dict)
+  timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+  metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class TrendResult(DictMixin):
+  """Return type of Memory.trends(). Metric trajectory analysis."""
+
+  metric: str | None = None
+  direction: str | None = None
+  rate: float = 0.0
+  projection: float = 0.0
+  values: list[float] = field(default_factory=list)
+  epochs: list[int] = field(default_factory=list)
+
+
+@dataclass
+class MemoryContext(DictMixin):
+  """Return type of Memory.context(). Full decision context for the agent."""
+
+  epoch: int = 0
+  top_failures: list[MemoryRecord] = field(default_factory=list)
+  strategies_tried: list[str] = field(default_factory=list)
+  blocked: list[str] = field(default_factory=list)
+  untried: list[str] = field(default_factory=list)
+  trends: dict[str, TrendResult] = field(default_factory=dict)
+  total_records: int = 0
+
+  @classmethod
+  def from_dict(cls, data: dict[str, Any]) -> 'MemoryContext':
+    data = dict(data)
+    data['top_failures'] = [MemoryRecord.from_dict(r) for r in data.get('top_failures', [])]
+    data['trends'] = {k: TrendResult.from_dict(v) for k, v in data.get('trends', {}).items()}
+    names = {f.name for f in fields(cls)}
+    return cls(**{k: v for k, v in data.items() if k in names})
+
+
+@dataclass
+class BlockedStrategy(DictMixin):
+  """Entry in strategy_blocklist.json."""
+
+  strategy: str | None = None
+  reason: str | None = None
+  epoch_blocked: int = 0
+  timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +82,28 @@ class Memory:
 
   Abstract base. Override all methods for custom storage backends.
   All data is structured -- MemoryRecord is the unit of storage.
+
+  Core operations:
+    learn(epoch, outcome, *, content, category, node, strategy, metrics, metadata)
+    recall(**filters)           -- query with filters: category, node, outcome,
+                                   strategy, epoch, epoch_min, epoch_max
+    trends(metric, window=5)    -- compute metric trajectory (direction, rate, projection)
+    context(epoch)              -- full decision context for the agent
+    block_strategy(strategy)    -- mark a strategy as blocked
+    is_strategy_blocked(strategy) -- check if blocked
+    blocked_strategies()        -- list all blocked strategy names
+
+  Trend direction detection:
+    >60% positive diffs = 'improving', >60% negative = 'declining',
+    max diff < 0.01 = 'plateau', else 'oscillating'.
+
+  Integration: MemoryCallback (core/callbacks/memory.py) wires Memory into
+  the training loop. AgentOptimizer.update_context() accepts memory context.
+  The blocklist flow: MemoryCallback.on_before_optimizer_step syncs blocked
+  strategies from Memory to the Optimizer.
+
+  Built-in subclass: FileMemory (below) using knowledge_base.jsonl +
+  strategy_blocklist.json.
   """
 
   def learn(
@@ -27,10 +111,10 @@ class Memory:
     epoch: int,
     outcome: str,
     *,
-    content: str = '',
-    category: str = '',
-    node: str = '',
-    strategy: str = '',
+    content: str | None = None,
+    category: str | None = None,
+    node: str | None = None,
+    strategy: str | None = None,
     metrics: dict[str, float] | None = None,
     metadata: dict[str, Any] | None = None,
   ) -> None:
@@ -45,7 +129,7 @@ class Memory:
   def context(self, epoch: int) -> MemoryContext:
     return MemoryContext(epoch=epoch)
 
-  def block_strategy(self, strategy: str, *, reason: str = '', epoch: int = 0) -> None:
+  def block_strategy(self, strategy: str, *, reason: str | None = None, epoch: int = 0) -> None:
     pass
 
   def is_strategy_blocked(self, strategy: str) -> bool:
@@ -57,15 +141,25 @@ class Memory:
   def state_dict(self) -> dict:
     return {}
 
-  def load_state_dict(self, state: dict) -> None:
+  def load_state_dict(self, state_dict: dict) -> None:
     pass
 
 
 class FileMemory(Memory):
   """File-backed Memory using knowledge_base.jsonl + strategy_blocklist.json.
 
-  Each line in knowledge_base.jsonl is a MemoryRecord.to_dict().
-  strategy_blocklist.json is a list of BlockedStrategy.to_dict().
+  File formats:
+    knowledge_base.jsonl      -- one MemoryRecord.to_dict() per line, append-only
+    strategy_blocklist.json   -- JSON array of BlockedStrategy.to_dict(), atomic-written
+
+  Gotchas:
+    - _load_records() reads the full JSONL on every recall/trends/context call.
+      No in-memory cache. For long experiments this could be slow.
+    - blocked_strategies() returns list[str] (names only), not list[BlockedStrategy].
+    - learn() requires outcome as a positional argument; all other fields are keyword-only.
+    - The strategy field on MemoryRecord and trainer.fit_context['strategy'] are the
+      linkage point for the blocklist system. If ctx['strategy'] is not set, the
+      blocklist has no effect.
   """
 
   def __init__(self, experiment_dir: Path) -> None:
@@ -78,10 +172,10 @@ class FileMemory(Memory):
     epoch: int,
     outcome: str,
     *,
-    content: str = '',
-    category: str = '',
-    node: str = '',
-    strategy: str = '',
+    content: str | None = None,
+    category: str | None = None,
+    node: str | None = None,
+    strategy: str | None = None,
     metrics: dict[str, float] | None = None,
     metadata: dict[str, Any] | None = None,
   ) -> None:
@@ -156,7 +250,7 @@ class FileMemory(Memory):
       total_records=len(records),
     )
 
-  def block_strategy(self, strategy: str, *, reason: str = '', epoch: int = 0) -> None:
+  def block_strategy(self, strategy: str, *, reason: str | None = None, epoch: int = 0) -> None:
     blocklist = self._load_blocklist()
     existing = {b.strategy for b in blocklist}
     if strategy in existing:
@@ -181,9 +275,9 @@ class FileMemory(Memory):
       'blocklist': [b.to_dict() for b in blocklist],
     }
 
-  def load_state_dict(self, state: dict) -> None:
-    records = state.get('records', [])
-    blocklist = state.get('blocklist', [])
+  def load_state_dict(self, state_dict: dict) -> None:
+    records = state_dict.get('records', [])
+    blocklist = state_dict.get('blocklist', [])
     self._dir.mkdir(parents=True, exist_ok=True)
     if self._kb_path.exists():
       self._kb_path.unlink()
@@ -213,19 +307,8 @@ class FileMemory(Memory):
     return result
 
   def _save_blocklist(self, blocklist: list[BlockedStrategy]) -> None:
-    self._blocklist_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = self._blocklist_path.with_suffix(self._blocklist_path.suffix + '.tmp')
     payload = [b.to_dict() for b in blocklist]
-    try:
-      text = json.dumps(payload, indent=2, sort_keys=False)
-      tmp.write_text(text, encoding='utf-8')
-      tmp.replace(self._blocklist_path)
-    except OSError as exc:
-      raise TrackingError(f'failed to write blocklist at {self._blocklist_path}: {exc}') from exc
-    except (TypeError, ValueError) as exc:
-      if tmp.exists():
-        tmp.unlink(missing_ok=True)
-      raise TrackingError(f'blocklist is not JSON-serializable: {exc}') from exc
+    atomic_write_json(self._blocklist_path, payload)
 
   def _apply_filters(
     self,

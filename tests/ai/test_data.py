@@ -1,5 +1,5 @@
 from autopilot.ai.data import SlotPlanner, StratifiedSplitter
-from autopilot.ai.models import ConversationTurn, DataItem, VarDef
+from autopilot.ai.evaluation.schemas import ConversationTurn, DataItem, VarDef
 from autopilot.data.dataset import ListDataset
 from pydantic import BaseModel
 import pytest

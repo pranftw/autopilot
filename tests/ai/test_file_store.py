@@ -1,8 +1,9 @@
 """Comprehensive tests for FileStore: content-addressed code versioning."""
 
 from autopilot.ai.parameter import PathParameter
-from autopilot.ai.store import FileStore, _hash_file
+from autopilot.ai.store import FileStore, _hash_content
 from autopilot.core.errors import StoreError
+from autopilot.core.parameter import Parameter
 from pathlib import Path
 import json
 import pytest
@@ -26,9 +27,7 @@ def _make_store(tmp_path: Path, slug: str = 'exp-001', files: dict[str, str] | N
   return store, src, params
 
 
-# ---------------------------------------------------------------------------
-# Init (idempotent constructor)
-# ---------------------------------------------------------------------------
+# init (idempotent constructor)
 
 
 class TestInit:
@@ -44,7 +43,7 @@ class TestInit:
     params = [PathParameter(source=str(src), pattern='*')]
     store = FileStore(store_path, 'exp', params)
 
-    content_hash = _hash_file(src / 'a.txt')
+    content_hash = _hash_content('hello')
     prefix = content_hash[:2]
     rest = content_hash[2:]
     assert (store.path / 'objects' / prefix / rest).exists()
@@ -88,9 +87,7 @@ class TestInit:
     assert store.epoch == 0
 
 
-# ---------------------------------------------------------------------------
-# Snapshot
-# ---------------------------------------------------------------------------
+# snapshot
 
 
 class TestSnapshot:
@@ -99,12 +96,12 @@ class TestSnapshot:
     (src / 'main.py').write_text('print("updated")')
     snap = store.snapshot(1)
     key = [k for k in snap.entries if 'main.py' in k][0]
-    new_hash = _hash_file(src / 'main.py')
+    new_hash = _hash_content('print("updated")')
     assert snap.entries[key].hash == new_hash
 
   def test_deduplicates_unchanged_files(self, tmp_path: Path) -> None:
     store, src, _ = _make_store(tmp_path)
-    old_hash = _hash_file(src / 'util.py')
+    old_hash = _hash_content('x = 1')
     snap = store.snapshot(1)
     key = [k for k in snap.entries if 'util.py' in k][0]
     assert snap.entries[key].hash == old_hash
@@ -141,9 +138,7 @@ class TestSnapshot:
     assert store.epoch == 1
 
 
-# ---------------------------------------------------------------------------
-# Checkout
-# ---------------------------------------------------------------------------
+# checkout
 
 
 class TestCheckout:
@@ -176,9 +171,7 @@ class TestCheckout:
       store.checkout(99)
 
 
-# ---------------------------------------------------------------------------
-# Diff
-# ---------------------------------------------------------------------------
+# diff
 
 
 class TestDiff:
@@ -240,9 +233,7 @@ class TestDiff:
     assert '+modified' in modified[0].text_diff
 
 
-# ---------------------------------------------------------------------------
-# Branch
-# ---------------------------------------------------------------------------
+# branch
 
 
 class TestBranch:
@@ -287,9 +278,7 @@ class TestBranch:
     assert (src / 'main.py').read_text() == original
 
 
-# ---------------------------------------------------------------------------
-# Merge
-# ---------------------------------------------------------------------------
+# merge
 
 
 class TestMerge:
@@ -355,9 +344,7 @@ class TestMerge:
       store.merge('nonexistent')
 
 
-# ---------------------------------------------------------------------------
-# Log
-# ---------------------------------------------------------------------------
+# log
 
 
 class TestLog:
@@ -392,9 +379,7 @@ class TestLog:
     assert entries[0].file_count == 2
 
 
-# ---------------------------------------------------------------------------
-# Status
-# ---------------------------------------------------------------------------
+# status
 
 
 class TestStatus:
@@ -432,9 +417,7 @@ class TestStatus:
     assert 'new.py' in added[0].path
 
 
-# ---------------------------------------------------------------------------
-# Promote
-# ---------------------------------------------------------------------------
+# promote
 
 
 class TestPromote:
@@ -457,7 +440,7 @@ class TestPromote:
     snap_path = store.path / 'snapshots' / 'exp-001' / 'epoch_0.json'
     data = json.loads(snap_path.read_text())
     key = [k for k in data['entries'] if 'main.py' in k][0]
-    promoted_hash = _hash_file(src / 'main.py')
+    promoted_hash = _hash_content('promoted version')
     assert data['entries'][key]['hash'] == promoted_hash
 
   def test_detects_external_modification(self, tmp_path: Path) -> None:
@@ -471,9 +454,7 @@ class TestPromote:
       store.promote(1)
 
 
-# ---------------------------------------------------------------------------
-# Round-trip integration
-# ---------------------------------------------------------------------------
+# round-trip integration
 
 
 class TestIntegration:
@@ -552,9 +533,7 @@ class TestIntegration:
     assert len(entries) == 2
 
 
-# ---------------------------------------------------------------------------
-# Atomic writes and locking
-# ---------------------------------------------------------------------------
+# atomic writes and locking
 
 
 class TestAtomicAndLocking:
@@ -591,3 +570,174 @@ class TestAtomicAndLocking:
       assert 'epoch' in data
       assert 'entries' in data
       assert 'timestamp' in data
+
+
+# snapshot/restore decoupling tests
+
+
+class TestSnapshotRestoreDecoupling:
+  def test_filestore_snapshot_via_param_snapshot(self, tmp_path: Path) -> None:
+    """Custom Parameter subclass with snapshot() works with FileStore."""
+
+    class PromptParameter(Parameter):
+      def __init__(self, text: str) -> None:
+        super().__init__()
+        self._text = text
+
+      def snapshot(self) -> dict[str, str]:
+        return {'prompt': self._text}
+
+      def restore(self, content: dict[str, str]) -> None:
+        self._text = content['prompt']
+
+    store_path = tmp_path / '.store'
+    param = PromptParameter('hello world')
+    store = FileStore(store_path, 'test-slug', [param])
+    snap = store._load_snapshot('test-slug', 0)
+    assert len(snap.entries) == 1
+    key = list(snap.entries.keys())[0]
+    assert key == 'param_0/prompt'
+
+  def test_filestore_checkout_via_param_restore(self, tmp_path: Path) -> None:
+    """Checkout calls param.restore() with correct content."""
+
+    class PromptParameter(Parameter):
+      def __init__(self, text: str) -> None:
+        super().__init__()
+        self._text = text
+
+      def snapshot(self) -> dict[str, str]:
+        return {'prompt': self._text}
+
+      def restore(self, content: dict[str, str]) -> None:
+        self._text = content['prompt']
+
+    store_path = tmp_path / '.store'
+    param = PromptParameter('v1')
+    store = FileStore(store_path, 'test-slug', [param])
+
+    param._text = 'v2'
+    store.snapshot(1)
+
+    store.checkout(0)
+    assert param._text == 'v1'
+
+  def test_filestore_empty_snapshot(self, tmp_path: Path) -> None:
+    """Parameter with default empty snapshot() causes no crash."""
+    store_path = tmp_path / '.store'
+    param = Parameter()
+    store = FileStore(store_path, 'empty-snap', [param])
+    snap = store._load_snapshot('empty-snap', 0)
+    assert len(snap.entries) == 0
+
+  def test_filestore_diff_uses_param_snapshot(self, tmp_path: Path) -> None:
+    """Diff detects changes from param.snapshot() output."""
+
+    class PromptParameter(Parameter):
+      def __init__(self, text: str) -> None:
+        super().__init__()
+        self._text = text
+
+      def snapshot(self) -> dict[str, str]:
+        return {'prompt': self._text}
+
+      def restore(self, content: dict[str, str]) -> None:
+        self._text = content['prompt']
+
+    store_path = tmp_path / '.store'
+    param = PromptParameter('original')
+    store = FileStore(store_path, 'diff-test', [param])
+
+    param._text = 'modified'
+    store.snapshot(1)
+
+    result = store.diff(0, 'diff-test', 1)
+    assert len(result.modified()) == 1
+    assert 'prompt' in result.modified()[0].path
+
+  def test_filestore_multiple_param_types(self, tmp_path: Path) -> None:
+    """Mix of PathParameter and custom parameter both snapshot/checkout correctly."""
+
+    class PromptParameter(Parameter):
+      def __init__(self, text: str) -> None:
+        super().__init__()
+        self._text = text
+
+      def snapshot(self) -> dict[str, str]:
+        return {'prompt': self._text}
+
+      def restore(self, content: dict[str, str]) -> None:
+        self._text = content['prompt']
+
+    src = _make_source(tmp_path, files={'code.py': 'x = 1'})
+    store_path = tmp_path / '.store'
+    path_param = PathParameter(source=str(src), pattern='*')
+    prompt_param = PromptParameter('system prompt v1')
+    store = FileStore(store_path, 'mixed', [path_param, prompt_param])
+
+    snap = store._load_snapshot('mixed', 0)
+    assert len(snap.entries) == 2
+
+    (src / 'code.py').write_text('x = 2')
+    prompt_param._text = 'system prompt v2'
+    store.snapshot(1)
+
+    store.checkout(0)
+    assert (src / 'code.py').read_text() == 'x = 1'
+    assert prompt_param._text == 'system prompt v1'
+
+  def test_filestore_no_pathparameter_import(self) -> None:
+    """Verify ai/store.py does not import PathParameter."""
+    import autopilot.ai.store as store_module
+
+    source = Path(store_module.__file__).read_text()
+    assert 'PathParameter' not in source
+
+  def test_filestore_composite_keys(self, tmp_path: Path) -> None:
+    """Snapshot keys use param_name/state_key format."""
+
+    class PromptParameter(Parameter):
+      def __init__(self, text: str) -> None:
+        super().__init__()
+        self._text = text
+
+      def snapshot(self) -> dict[str, str]:
+        return {'system': self._text}
+
+      def restore(self, content: dict[str, str]) -> None:
+        self._text = content['system']
+
+    store_path = tmp_path / '.store'
+    param = PromptParameter('hello')
+    store = FileStore(store_path, 'keys-test', [param])
+    snap = store._load_snapshot('keys-test', 0)
+    keys = list(snap.entries.keys())
+    assert len(keys) == 1
+    assert keys[0] == 'param_0/system'
+
+  def test_filestore_content_addressed_dedup(self, tmp_path: Path) -> None:
+    """Two parameters with identical snapshot content share one object."""
+
+    class PromptParameter(Parameter):
+      def __init__(self, text: str) -> None:
+        super().__init__()
+        self._text = text
+
+      def snapshot(self) -> dict[str, str]:
+        return {'prompt': self._text}
+
+      def restore(self, content: dict[str, str]) -> None:
+        self._text = content['prompt']
+
+    store_path = tmp_path / '.store'
+    p1 = PromptParameter('same content')
+    p2 = PromptParameter('same content')
+    store = FileStore(store_path, 'dedup', [p1, p2])
+
+    snap = store._load_snapshot('dedup', 0)
+    hashes = [entry.hash for entry in snap.entries.values()]
+    assert hashes[0] == hashes[1]
+    obj_hash = hashes[0]
+    prefix = obj_hash[:2]
+    rest = obj_hash[2:]
+    assert (store.path / 'objects' / prefix / rest).exists()

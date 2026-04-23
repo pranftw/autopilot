@@ -50,10 +50,9 @@ class TestBuildParser:
   def test_project_default_empty(self) -> None:
     parser = build_parser()
     args = parser.parse_args(['workspace', 'doctor', '--workspace', '.'])
-    assert args.project == ''
+    assert args.project is None
 
   def test_project_command_registered(self) -> None:
     parser = build_parser()
     args = parser.parse_args(['project', 'list', '--workspace', '.'])
     assert args.command == 'project'
-

@@ -1,8 +1,9 @@
 """Tests for Loop class hierarchy."""
 
-from autopilot.core.loops import EpochLoop, Loop, LoopConfig
-from autopilot.core.models import Datum
+from autopilot.core.loops.epoch import EpochLoop
+from autopilot.core.loops.loop import Loop, LoopConfig
 from autopilot.core.module import Module
+from autopilot.core.types import Datum
 import pytest
 
 
@@ -16,9 +17,7 @@ class _TrainerShim:
 
   def __init__(self) -> None:
     self.module = _StubModule()
-    self._policy = None
-    self._store = None
-    self._best_epoch = 0
+    self.policy = None
 
   def _dispatch(self, *args: object, **kwargs: object) -> list[object]:
     return []

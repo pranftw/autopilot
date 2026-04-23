@@ -5,27 +5,24 @@ First-class hyperparameter handling with versioning and locking.
 
 from autopilot.core.errors import ExperimentError
 from autopilot.core.models import HyperparamSet
+from autopilot.tracking.io import atomic_write_json, read_json
 from pathlib import Path
 from typing import Any
-import json
 
 
 def load_hyperparams(experiment_dir: Path) -> HyperparamSet:
   """Load hyperparams.json from an experiment directory."""
   path = experiment_dir / 'hyperparams.json'
-  if not path.exists():
+  data = read_json(path)
+  if data is None:
     return HyperparamSet()
-  with open(path) as f:
-    data = json.load(f)
   return HyperparamSet.from_dict(data)
 
 
 def save_hyperparams(experiment_dir: Path, hparams: HyperparamSet) -> None:
   """Write hyperparams.json to an experiment directory."""
   path = experiment_dir / 'hyperparams.json'
-  with open(path, 'w') as f:
-    json.dump(hparams.to_dict(), f, indent=2)
-    f.write('\n')
+  atomic_write_json(path, hparams.to_dict())
 
 
 def update_hyperparams(

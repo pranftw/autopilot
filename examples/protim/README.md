@@ -1,6 +1,6 @@
 # protim
 
-Agent-optimized system prompt using the full AutoPilot loop with Claude Code. Requires the `claude` CLI.
+System prompt optimized through the AutoPilot loop with an LLM coding agent (Claude Code). Requires the `claude` CLI.
 
 ## What this demonstrates
 
@@ -8,7 +8,7 @@ Agent-optimized system prompt using the full AutoPilot loop with Claude Code. Re
 - `PathParameter` declaring the prompt file as a mutable parameter
 - `Loss` producing text gradients from QA failures
 - `AgentOptimizer` passing gradients to a coding agent that edits the prompt
-- The complete forward -> loss -> backward -> optimizer.step() loop with a real agent
+- The complete forward -> loss -> backward -> optimizer.step() loop with an LLM-backed optimizer
 
 ## How it works
 
@@ -28,7 +28,10 @@ Two `ClaudeCodeAgent` instances:
 | File | What it does |
 | --- | --- |
 | `protim/module.py` | `PromptModule`, `PromptLoss`, `QAAccuracyMetric` |
+| `protim/trainer.py` | `AccuracyPolicy`, `build_trainer()` -- `FileStore` on `Experiment`, `Trainer(..., experiment=..., policy=...)` |
+| `protim/data.py` | `QADataset`, `QADataModule` |
 | `run.py` | Manual loop: forward -> loss -> backward -> agent step |
+| `run_trainer.py` | Lightning-style `Trainer.fit()` |
 | `datasets/train.jsonl` | 8 factual QA items |
 | `prompts/system.txt` | Seed system prompt (intentionally minimal) |
 

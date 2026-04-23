@@ -17,6 +17,7 @@ class PolicyCommand(Command):
 
   @subcommand('check', help='Evaluate policies against experiment state')
   def check(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Evaluate policies against the experiment result."""
     slug = ctx.experiment
     if not slug:
       ctx.output.info('Available policies:')
@@ -71,9 +72,11 @@ class PolicyCommand(Command):
 
   @subcommand('explain', help='Explain policy outcome for experiment')
   def explain(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Explain why the policy produced its gate result."""
     slug = ctx.experiment
     if not slug:
-      raise ValueError('experiment slug required (--experiment)')
+      ctx.output.error('experiment slug required (--experiment)')
+      return
 
     if not ctx.module:
       ctx.output.result(

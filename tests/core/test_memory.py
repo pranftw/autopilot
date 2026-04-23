@@ -1,7 +1,18 @@
-"""Tests for Memory base class and FileMemory implementation."""
+"""Tests for Memory base class, FileMemory, MemoryCallback, and memory data models."""
 
-from autopilot.core.memory import FileMemory, Memory
-from autopilot.core.stage_models import MemoryContext, MemoryRecord, TrendResult
+from autopilot.core.callbacks.memory import MemoryCallback
+from autopilot.core.memory import (
+  BlockedStrategy,
+  FileMemory,
+  Memory,
+  MemoryContext,
+  MemoryRecord,
+  TrendResult,
+)
+from autopilot.core.models import Result
+from autopilot.core.optimizer import Optimizer
+from autopilot.core.trainer import Trainer
+from unittest.mock import MagicMock
 import json
 
 
@@ -258,3 +269,239 @@ class TestFileMemory:
     bl_path.write_text('not valid json')
     m = FileMemory(tmp_path)
     assert m.blocked_strategies() == []
+
+
+class TestMemoryRecordRoundTrip:
+  def test_round_trip(self):
+    r = MemoryRecord(epoch=1, outcome='worked', metrics={'accuracy': 0.85}, category='eval')
+    d = r.to_dict()
+    r2 = MemoryRecord.from_dict(d)
+    assert r2.epoch == 1
+    assert r2.outcome == 'worked'
+    assert r2.metrics == {'accuracy': 0.85}
+    assert r2.category == 'eval'
+
+  def test_metrics_preserved_as_floats(self):
+    r = MemoryRecord(metrics={'a': 0.5, 'b': 1.0})
+    d = r.to_dict()
+    r2 = MemoryRecord.from_dict(d)
+    assert isinstance(r2.metrics['a'], float)
+    assert isinstance(r2.metrics['b'], float)
+
+  def test_defaults(self):
+    r = MemoryRecord.from_dict({})
+    assert r.epoch == 0
+    assert r.metrics == {}
+    assert r.content is None
+
+  def test_unknown_keys_ignored(self):
+    r = MemoryRecord.from_dict({'epoch': 1, 'unknown_key': 'ignored'})
+    assert r.epoch == 1
+
+  def test_timestamp_auto_populated(self):
+    r = MemoryRecord(epoch=1, outcome='worked')
+    assert r.timestamp != ''
+
+
+class TestTrendResultRoundTrip:
+  def test_round_trip(self):
+    t = TrendResult(
+      metric='accuracy',
+      direction='improving',
+      rate=0.05,
+      values=[0.7, 0.75, 0.8],
+      epochs=[1, 2, 3],
+    )
+    d = t.to_dict()
+    t2 = TrendResult.from_dict(d)
+    assert t2.metric == 'accuracy'
+    assert t2.direction == 'improving'
+    assert t2.values == [0.7, 0.75, 0.8]
+    assert t2.epochs == [1, 2, 3]
+
+
+class TestMemoryContextRoundTrip:
+  def test_round_trip(self):
+    rec = MemoryRecord(epoch=1, outcome='failed')
+    trend = TrendResult(metric='accuracy', direction='improving')
+    ctx = MemoryContext(
+      epoch=3,
+      top_failures=[rec],
+      strategies_tried=['a', 'b'],
+      blocked=['c'],
+      trends={'accuracy': trend},
+      total_records=5,
+    )
+    d = ctx.to_dict()
+    ctx2 = MemoryContext.from_dict(d)
+    assert ctx2.epoch == 3
+    assert len(ctx2.top_failures) == 1
+    assert isinstance(ctx2.top_failures[0], MemoryRecord)
+    assert ctx2.strategies_tried == ['a', 'b']
+    assert isinstance(ctx2.trends['accuracy'], TrendResult)
+
+
+class TestBlockedStrategyRoundTrip:
+  def test_round_trip(self):
+    b = BlockedStrategy(strategy='x', reason='bad', epoch_blocked=2)
+    d = b.to_dict()
+    b2 = BlockedStrategy.from_dict(d)
+    assert b2.strategy == 'x'
+    assert b2.reason == 'bad'
+    assert b2.epoch_blocked == 2
+
+  def test_timestamp_auto(self):
+    b = BlockedStrategy(strategy='x')
+    assert b.timestamp != ''
+
+
+# memorycallback tests
+
+
+def _memory_trainer(
+  *,
+  fit_context: dict | None = None,
+  experiment: MagicMock | None = None,
+) -> MagicMock:
+  trainer = MagicMock()
+  trainer.fit_context = fit_context if fit_context is not None else {}
+  trainer.experiment = experiment
+  return trainer
+
+
+class TestMemoryCallback:
+  def test_records_structured_learnings(self, tmp_path):
+    memory = FileMemory(tmp_path)
+    cb = MemoryCallback(memory)
+    trainer = _memory_trainer()
+    result = Result(metrics={'accuracy': 0.8}, passed=True)
+    cb.on_epoch_end(trainer=trainer, epoch=1, result=result)
+    records = memory.recall()
+    assert len(records) == 1
+    assert records[0].epoch == 1
+    assert records[0].outcome == 'worked'
+    assert records[0].metrics == {'accuracy': 0.8}
+    assert records[0].category == 'epoch_result'
+
+  def test_default_category(self, tmp_path):
+    memory = FileMemory(tmp_path)
+    cb = MemoryCallback(memory)
+    trainer = _memory_trainer()
+    cb.on_epoch_end(trainer=trainer, epoch=1, result=Result(passed=True))
+    records = memory.recall()
+    assert records[0].category == 'epoch_result'
+
+  def test_custom_category(self, tmp_path):
+    memory = FileMemory(tmp_path)
+    cb = MemoryCallback(memory, default_category='custom')
+    trainer = _memory_trainer()
+    cb.on_epoch_end(trainer=trainer, epoch=1, result=Result(passed=True))
+    records = memory.recall()
+    assert records[0].category == 'custom'
+
+  def test_recorded_entry_has_metrics(self, tmp_path):
+    memory = FileMemory(tmp_path)
+    cb = MemoryCallback(memory)
+    trainer = _memory_trainer()
+    result = Result(metrics={'accuracy': 0.9, 'f1': 0.85}, passed=True)
+    cb.on_epoch_end(trainer=trainer, epoch=1, result=result)
+    records = memory.recall()
+    assert records[0].metrics['accuracy'] == 0.9
+    assert records[0].metrics['f1'] == 0.85
+
+  def test_result_metrics_includes_merged_val_metrics(self, tmp_path):
+    memory = FileMemory(tmp_path)
+    cb = MemoryCallback(memory)
+    trainer = _memory_trainer()
+    result = Result(
+      metrics={'loss': 0.3, 'val_loss': 0.4, 'val_accuracy': 0.88},
+      passed=True,
+    )
+    cb.on_epoch_end(trainer=trainer, epoch=1, result=result)
+    records = memory.recall()
+    assert records[0].metrics == result.metrics
+    assert records[0].metrics['val_accuracy'] == 0.88
+
+  def test_rollback_outcome_when_experiment_should_rollback(self, tmp_path):
+    memory = FileMemory(tmp_path)
+    cb = MemoryCallback(memory)
+    exp = MagicMock()
+    exp.should_rollback = True
+    trainer = _memory_trainer(experiment=exp)
+    result = Result(metrics={'val_accuracy': 0.9}, passed=True)
+    cb.on_epoch_end(trainer=trainer, epoch=1, result=result)
+    records = memory.recall()
+    assert records[0].outcome == 'rollback'
+
+  def test_strategy_from_fit_context(self, tmp_path):
+    memory = FileMemory(tmp_path)
+    cb = MemoryCallback(memory)
+    trainer = _memory_trainer(fit_context={'strategy': 'try_smaller_batch'})
+    result = Result(metrics={'accuracy': 0.8}, passed=True)
+    cb.on_epoch_end(trainer=trainer, epoch=1, result=result)
+    records = memory.recall()
+    assert records[0].strategy == 'try_smaller_batch'
+
+  def test_populates_blocked_via_method(self, tmp_path):
+    memory = FileMemory(tmp_path)
+    memory.block_strategy('bad_approach')
+    cb = MemoryCallback(memory)
+    opt = Optimizer(parameters=[], lr=1.0)
+    trainer = MagicMock()
+    trainer.optimizer = opt
+    cb.on_before_optimizer_step(trainer=trainer)
+    assert opt.is_strategy_blocked('bad_approach')
+
+  def test_no_blocklist(self, tmp_path):
+    memory = FileMemory(tmp_path)
+    cb = MemoryCallback(memory)
+    opt = Optimizer(parameters=[], lr=1.0)
+    trainer = MagicMock()
+    trainer.optimizer = opt
+    cb.on_before_optimizer_step(trainer=trainer)
+    assert opt.blocked_strategies == frozenset()
+
+  def test_accesses_optimizer_via_trainer_property(self, tmp_path):
+    memory = FileMemory(tmp_path)
+    memory.block_strategy('x')
+    cb = MemoryCallback(memory)
+    opt = Optimizer(parameters=[], lr=1.0)
+    trainer = Trainer()
+    trainer._optimizer = opt
+    cb.on_before_optimizer_step(trainer=trainer)
+    assert opt.is_strategy_blocked('x')
+
+  def test_state_dict_delegates_to_memory(self, tmp_path):
+    memory = FileMemory(tmp_path)
+    memory.learn(epoch=1, outcome='worked')
+    cb = MemoryCallback(memory)
+    state = cb.state_dict()
+    assert 'records' in state
+    assert len(state['records']) == 1
+
+  def test_memory_file_written_structured(self, tmp_path):
+    memory = FileMemory(tmp_path)
+    cb = MemoryCallback(memory)
+    trainer = _memory_trainer()
+    result = Result(metrics={'accuracy': 0.7}, passed=False)
+    cb.on_epoch_end(trainer=trainer, epoch=1, result=result)
+
+    lines = (tmp_path / 'knowledge_base.jsonl').read_text().strip().splitlines()
+    data = json.loads(lines[0])
+    assert data['epoch'] == 1
+    assert data['outcome'] == 'failed'
+    assert data['metrics'] == {'accuracy': 0.7}
+    assert data['category'] == 'epoch_result'
+
+  def test_load_state_dict_round_trip(self, tmp_path):
+    memory = FileMemory(tmp_path)
+    memory.learn(epoch=1, outcome='worked', metrics={'accuracy': 0.8})
+    memory.learn(epoch=2, outcome='failed', metrics={'accuracy': 0.6})
+    cb = MemoryCallback(memory)
+    state = cb.state_dict()
+
+    memory2 = FileMemory(tmp_path / 'other')
+    cb2 = MemoryCallback(memory2)
+    cb2.load_state_dict(state)
+    state2 = cb2.state_dict()
+    assert len(state2['records']) == 2

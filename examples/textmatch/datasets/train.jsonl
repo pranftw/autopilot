@@ -1,5 +1,5 @@
-{"item_id": "train_1", "text": "My credit card was charged twice for order #1234", "expected_category": "billing"}
-{"item_id": "train_2", "text": "The API returns a 500 error when I call /users endpoint", "expected_category": "technical"}
-{"item_id": "train_3", "text": "What are your store hours on weekends?", "expected_category": "general"}
-{"item_id": "train_4", "text": "I need to update my email address on my account", "expected_category": "account"}
-{"item_id": "train_5", "text": "When will my package arrive? Tracking shows no updates", "expected_category": "shipping"}
+{"text": "My credit card was charged twice for order #1234", "expected_category": "billing", "metadata": {"label": "train_1"}}
+{"text": "The API returns a 500 error when I call /users endpoint", "expected_category": "technical", "metadata": {"label": "train_2"}}
+{"text": "What are your store hours on weekends?", "expected_category": "general", "metadata": {"label": "train_3"}}
+{"text": "I need to update my email address on my account", "expected_category": "account", "metadata": {"label": "train_4"}}
+{"text": "When will my package arrive? Tracking shows no updates", "expected_category": "shipping", "metadata": {"label": "train_5"}}

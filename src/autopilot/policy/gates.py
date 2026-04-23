@@ -1,11 +1,23 @@
 """Composable scoring gates. Like nn.Module for loss functions."""
 
-from autopilot.core.models import GateResult, Result
+from autopilot.core.models import Result
+from autopilot.core.types import GateResult
 from typing import Any
 
 
 class Gate:
-  """Base class for scoring gates. Subclass and override forward()."""
+  """Base class for scoring gates. Subclass and override forward().
+
+  Gates are objects with forward(result) -> GateResult, not dict-driven helpers.
+  Wire gates inside Policy subclasses (e.g. QualityFirstPolicy(gates=[...])).
+
+  Missing metrics: all built-in gate classes return GateResult.FAIL when the
+  metric is not present in result.metrics. A missing metric is treated the
+  same as a failed condition.
+
+  Built-ins: MinGate (>= threshold), MaxGate (<= threshold),
+  RangeGate (min <= value <= max), CustomGate (fn(value) -> bool).
+  """
 
   def __init__(self, metric: str, *, required: bool = True) -> None:
     self.metric = metric
@@ -35,13 +47,13 @@ class MinGate(Gate):
   def forward(self, result: Result) -> GateResult:
     value = result.metrics.get(self.metric)
     if value is None:
-      return GateResult.SKIP
+      return GateResult.FAIL
     return GateResult.PASS if value >= self.threshold else GateResult.FAIL
 
   def explain(self, result: Result) -> str:
     value = result.metrics.get(self.metric)
     if value is None:
-      return f'{self.metric}: skipped (not in result)'
+      return f'{self.metric}: fail (metric not present in result)'
     passed = value >= self.threshold
     outcome = 'pass' if passed else 'fail'
     return f'{self.metric}: {value:.3f} >= {self.threshold} -> {outcome}'
@@ -57,7 +69,7 @@ class MaxGate(Gate):
   def forward(self, result: Result) -> GateResult:
     value = result.metrics.get(self.metric)
     if value is None:
-      return GateResult.SKIP
+      return GateResult.FAIL
     return GateResult.PASS if value <= self.threshold else GateResult.FAIL
 
 
@@ -79,7 +91,7 @@ class RangeGate(Gate):
   def forward(self, result: Result) -> GateResult:
     value = result.metrics.get(self.metric)
     if value is None:
-      return GateResult.SKIP
+      return GateResult.FAIL
     return GateResult.PASS if self.min <= value <= self.max else GateResult.FAIL
 
 
@@ -99,5 +111,5 @@ class CustomGate(Gate):
   def forward(self, result: Result) -> GateResult:
     value = result.metrics.get(self.metric)
     if value is None:
-      return GateResult.SKIP
+      return GateResult.FAIL
     return GateResult.PASS if self._fn(value) else GateResult.FAIL

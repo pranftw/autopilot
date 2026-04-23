@@ -1,8 +1,10 @@
 """Tests for Parameter base class."""
 
-from autopilot.core.models import Datum
+from autopilot.core.gradient import Gradient
 from autopilot.core.module import Module
 from autopilot.core.parameter import Parameter
+from autopilot.core.types import Datum
+from helpers import NumericGradient
 
 
 class TestParameterBase:
@@ -20,8 +22,9 @@ class TestParameterBase:
 
   def test_parameter_set_grad(self) -> None:
     p = Parameter()
-    p.grad = 'text gradient about logic errors'
-    assert p.grad == 'text gradient about logic errors'
+    p.grad = NumericGradient(value=1.0)
+    assert isinstance(p.grad, Gradient)
+    assert p.grad.value == 1.0
 
   def test_parameter_to_dict_includes_grad_fields(self) -> None:
     p = Parameter(requires_grad=True)

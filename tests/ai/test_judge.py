@@ -1,8 +1,8 @@
-"""Tests for Judge base class."""
+"""Tests for JudgeAgent base class."""
 
-from autopilot.ai.checkpoints import CheckpointManager
-from autopilot.ai.judge import Judge
-from autopilot.ai.models import (
+from autopilot.ai.evaluation.checkpoints import CheckpointManager
+from autopilot.ai.evaluation.judge import JudgeAgent
+from autopilot.ai.evaluation.schemas import (
   ConversationTurn,
   JudgeConfig,
   JudgeInput,
@@ -11,7 +11,7 @@ from autopilot.ai.models import (
   RetryConfig,
   RunConfig,
 )
-from autopilot.ai.steps import PythonStep
+from autopilot.ai.evaluation.steps import PythonStep
 from autopilot.cli.output import Output
 from pydantic import BaseModel
 from unittest.mock import AsyncMock, patch
@@ -63,7 +63,7 @@ def _make_items(count: int = 3) -> list[JudgeInput[StubJudgeCustom]]:
   ]
 
 
-class StubJudge(Judge[StubJudgeConfig, StubJudgeCustom, StubResultCustom]):
+class StubJudge(JudgeAgent[StubJudgeConfig, StubJudgeCustom, StubResultCustom]):
   def define_steps(self, config):
     return [PythonStep('analyze', fn=lambda ctx: {'score': 0.9})]
 
@@ -86,9 +86,9 @@ class StubJudge(Judge[StubJudgeConfig, StubJudgeCustom, StubResultCustom]):
     }
 
 
-class TestJudgeAbstract:
+class TestJudgeAgentAbstract:
   def test_cannot_instantiate(self) -> None:
-    j = Judge()
+    j = JudgeAgent()
     with pytest.raises(NotImplementedError):
       j.define_steps(_make_config())
 
@@ -99,7 +99,7 @@ class TestJudgeAbstract:
 
 class TestRun:
   @pytest.mark.asyncio
-  @patch('autopilot.ai.judge.run_step_workflow', new_callable=AsyncMock)
+  @patch('autopilot.ai.evaluation.judge.run_step_workflow', new_callable=AsyncMock)
   async def test_processes_all_items(self, mock_workflow: AsyncMock, tmp_path) -> None:
     mock_workflow.return_value = {
       'analyze': {'score': 0.9},
@@ -114,7 +114,7 @@ class TestRun:
     assert result['summary']['correct'] == 3
 
   @pytest.mark.asyncio
-  @patch('autopilot.ai.judge.run_step_workflow', new_callable=AsyncMock)
+  @patch('autopilot.ai.evaluation.judge.run_step_workflow', new_callable=AsyncMock)
   async def test_checkpoint_per_item(self, mock_workflow: AsyncMock, tmp_path) -> None:
     mock_workflow.return_value = {'analyze': {'score': 0.9}, 'item': {}}
     judge = StubJudge()
@@ -128,7 +128,7 @@ class TestRun:
     assert len(result_events) == 3
 
   @pytest.mark.asyncio
-  @patch('autopilot.ai.judge.run_step_workflow', new_callable=AsyncMock)
+  @patch('autopilot.ai.evaluation.judge.run_step_workflow', new_callable=AsyncMock)
   async def test_build_summary_called(self, mock_workflow: AsyncMock, tmp_path) -> None:
     mock_workflow.return_value = {'analyze': {'score': 0.9}, 'item': {}}
     judge = StubJudge()
@@ -137,7 +137,7 @@ class TestRun:
     assert result['summary'] == {'total': 2, 'correct': 2}
 
   @pytest.mark.asyncio
-  @patch('autopilot.ai.judge.run_step_workflow', new_callable=AsyncMock)
+  @patch('autopilot.ai.evaluation.judge.run_step_workflow', new_callable=AsyncMock)
   async def test_output_written(self, mock_workflow: AsyncMock, tmp_path) -> None:
     mock_workflow.return_value = {'analyze': {'score': 0.9}, 'item': {}}
     judge = StubJudge()
@@ -152,7 +152,7 @@ class TestRun:
 
 class TestResume:
   @pytest.mark.asyncio
-  @patch('autopilot.ai.judge.run_step_workflow', new_callable=AsyncMock)
+  @patch('autopilot.ai.evaluation.judge.run_step_workflow', new_callable=AsyncMock)
   async def test_skips_completed_items(self, mock_workflow: AsyncMock, tmp_path) -> None:
     mock_workflow.return_value = {'analyze': {'score': 0.9}, 'item': {}}
     ckpt_path = tmp_path / 'checkpoint.jsonl'

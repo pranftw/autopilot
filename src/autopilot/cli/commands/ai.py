@@ -1,20 +1,24 @@
 """AI eval generation and judging commands."""
 
-from autopilot.ai.models import GeneratorConfig, JudgeConfig, JudgeInput
+from autopilot.ai.evaluation.schemas import GeneratorConfig, JudgeConfig, JudgeInput
 from autopilot.cli.command import Argument, Command, argument, subcommand
 from autopilot.cli.context import CLIContext
+from autopilot.core.artifacts.epoch import DataArtifact
 from autopilot.core.config import load_json
 from pathlib import Path
+from typing import Any
 import argparse
 import asyncio
 
 
-def _require(ctx: CLIContext, component: str) -> None:
-  """Raise if the named component is not set on context."""
-  if getattr(ctx, component, None) is None:
-    raise ValueError(
-      f'no {component} configured -- run via: autopilot -p <project> ai {component} run ...'
-    )
+def _require_generator(ctx: CLIContext) -> None:
+  if ctx.generator is None:
+    raise ValueError('no generator configured -- run via: autopilot -p <project> ai generate run')
+
+
+def _require_judge(ctx: CLIContext) -> None:
+  if ctx.judge is None:
+    raise ValueError('no judge configured -- run via: autopilot -p <project> ai judge run')
 
 
 def _load_generator_config(
@@ -68,7 +72,7 @@ def _build_judge_config(args: argparse.Namespace) -> JudgeConfig:
         'max_tool_steps': 5,
         'max_output_tokens': 4096,
       },
-      system_prompt='',
+      system_prompt=None,
     )
   if args.num_parallel:
     config.run.num_parallel = args.num_parallel
@@ -82,7 +86,7 @@ def _run_generate(
   args: argparse.Namespace,
 ) -> None:
   """Shared logic for generate subcommands."""
-  _require(ctx, 'generator')
+  _require_generator(ctx)
   config = _load_generator_config(args.ai_config, args)
   output_dir = ctx.datasets_dir / config.dataset_id
   result = ctx.generator.run(config, output_dir, ctx.output)
@@ -92,7 +96,6 @@ def _run_generate(
 class GenerateRun(Command):
   name = 'run'
   help = 'Run eval generation'
-  include_project_config = False
   ai_config = Argument('--config', required=True, dest='ai_config', help='generation config path')
   total_count = Argument('--total-count', type=int, default=0, help='override total item count')
   seed = Argument('--seed', type=int, default=0, help='override random seed')
@@ -111,7 +114,7 @@ class GenerateResume(Command):
 
   def forward(self, ctx: CLIContext, args: argparse.Namespace) -> None:
     """Handle 'autopilot ai generate resume'."""
-    _require(ctx, 'generator')
+    _require_generator(ctx)
     result = asyncio.run(ctx.generator.resume(Path(args.checkpoint), None, None, ctx.output))
     ctx.output.result(result)
 
@@ -131,11 +134,10 @@ class GenerateCommand(Command):
   @subcommand(
     'dry-run',
     help='Dry run: plan slots and steps without LLM calls',
-    include_project_config=False,
   )
   def dry_run(self, ctx: CLIContext, args: argparse.Namespace) -> None:
     """Handle 'autopilot ai generate dry-run'."""
-    _require(ctx, 'generator')
+    _require_generator(ctx)
     config = _load_generator_config(args.ai_config, args)
     result = ctx.generator.dry_run(config, ctx.output)
     ctx.output.result(result)
@@ -150,7 +152,7 @@ class JudgeRun(Command):
 
   def forward(self, ctx: CLIContext, args: argparse.Namespace) -> None:
     """Handle 'autopilot ai judge run'."""
-    _require(ctx, 'judge')
+    _require_judge(ctx)
     items = _load_judge_items(args.judge_input)
     output_dir = Path(args.judge_input).parent / 'judge_output'
     config = _build_judge_config(args)
@@ -166,7 +168,7 @@ class JudgeResume(Command):
 
   def forward(self, ctx: CLIContext, args: argparse.Namespace) -> None:
     """Handle 'autopilot ai judge resume'."""
-    _require(ctx, 'judge')
+    _require_judge(ctx)
     items = _load_judge_items(args.judge_input)
     result = asyncio.run(ctx.judge.resume(Path(args.checkpoint), items, None, None, ctx.output))
     ctx.output.result(result)
@@ -181,9 +183,9 @@ class JudgeSummarize(Command):
 
   def forward(self, ctx: CLIContext, args: argparse.Namespace) -> None:
     """Handle 'autopilot ai judge summarize'."""
-    _require(ctx, 'judge')
+    _require_judge(ctx)
     raw = load_json(Path(args.judge_input))
-    ctx.output.result(raw.get('summary', {}))
+    ctx.output.result(raw['summary'])
 
 
 class JudgeCommand(Command):
@@ -195,6 +197,30 @@ class JudgeCommand(Command):
     self.run = JudgeRun()
     self.resume = JudgeResume()
     self.summarize = JudgeSummarize()
+
+  @subcommand('distribution', help='show error category distribution')
+  def distribution(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Show failure-type distribution from epoch trace data."""
+    epoch = args.epoch or ctx.epoch
+    if not epoch:
+      ctx.output.error('--epoch is required')
+      return
+
+    exp_dir = ctx.experiment_dir()
+    data = DataArtifact().read_raw(exp_dir, epoch=epoch)
+
+    categories: dict[str, int] = {}
+    for item in data:
+      cat = item.get('metadata', {}).get('failure_type', 'unknown')
+      if not item.get('success', True):
+        categories[cat] = categories.get(cat, 0) + 1
+
+    result: dict[str, Any] = {
+      'epoch': epoch,
+      'total_items': len(data),
+      'failure_distribution': categories,
+    }
+    ctx.output.result(result)
 
 
 class AICommand(Command):

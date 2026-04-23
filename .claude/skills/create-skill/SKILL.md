@@ -5,7 +5,7 @@ description: Comprehensive guide for authoring new Agent Skills in this repo fol
 
 ## What is a skill?
 
-A skill is a directory containing a `SKILL.md` file that gives an AI agent specialized knowledge and step-by-step instructions for a specific domain. Skills live in `.claude/skills/` (also accessible via `.agents/skills/` symlink).
+A skill is a directory containing a `SKILL.md` file that gives specialized knowledge and step-by-step instructions for a specific domain. Skills live in `.claude/skills/`.
 
 ## Directory structure
 

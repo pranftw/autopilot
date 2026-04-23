@@ -10,7 +10,7 @@ Regex-rule text classifier optimized through the AutoPilot loop. No LLM required
 - `Optimizer` reading `param.grad` and editing rules on disk
 - `Metric` tracking accuracy per epoch
 - `DataModule` / `DataLoader` / `Dataset` wiring
-- `Trainer.fit()` with `Policy`, `Store`, `StoreCheckpoint`
+- `Trainer.fit()` with `Policy`, `Experiment` (owns `FileStore` via `store=`), and `StoreCheckpointCallback`; `Trainer` takes `experiment=`, not `store=`
 
 ## How it works
 
@@ -29,7 +29,7 @@ A support ticket classifier matches text against regex rules and assigns categor
 | `textmatch/module.py` | `TextMatchModule`, `TextMatchLoss`, `AccuracyMetric`, `RuleGradient` |
 | `textmatch/optimizer.py` | `RuleOptimizer` -- reads gradients, edits `rules.json` |
 | `textmatch/data.py` | `TextMatchDataset`, `TextMatchDataModule` |
-| `textmatch/trainer.py` | `AccuracyPolicy`, `build_trainer()` with Store + Policy |
+| `textmatch/trainer.py` | `AccuracyPolicy`, `build_trainer()` -- `FileStore` on `Experiment`, `Trainer(..., experiment=..., policy=...)` |
 | `textmatch/judge.py` | `RuleJudge` -- failure categorization |
 | `textmatch/cli.py` | `TextMatchCLI` -- AutoPilotCLI subclass |
 | `run.py` | Manual PyTorch-style loop |

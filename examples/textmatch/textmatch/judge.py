@@ -4,7 +4,7 @@ class RuleJudge:
     failure_type = meta.get('failure_type', 'unknown')
     return {
       'category': failure_type,
-      'item_id': datum.item_id,
+      'id': datum.id,
       'details': {
         'predicted': meta.get('predicted', ''),
         'expected': meta.get('expected', ''),

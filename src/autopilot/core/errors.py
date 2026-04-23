@@ -13,14 +13,6 @@ class ExperimentError(AutoPilotError):
   """Experiment lifecycle or state transition failure."""
 
 
-class DatasetError(AutoPilotError):
-  """Dataset registry, split, or validation failure."""
-
-
-class PolicyError(AutoPilotError):
-  """Policy evaluation or gate failure."""
-
-
 class TrackingError(AutoPilotError):
   """Manifest, event, or artifact tracking failure."""
 
@@ -43,14 +35,6 @@ class AIError(AutoPilotError):
 
 class AgentError(AutoPilotError):
   """Agent invocation failure."""
-
-
-class CLIError(AutoPilotError):
-  """CLI argument, dispatch, or command registration failure."""
-
-
-class ProposalError(AutoPilotError):
-  """Proposal create/verify/revert failure."""
 
 
 class OrchestratorError(AutoPilotError):

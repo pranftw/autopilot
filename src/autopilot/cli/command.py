@@ -8,7 +8,7 @@ __call__ runs. Entry point: AutoPilotCLI()().
 """
 
 from autopilot.cli.context import build_context
-from autopilot.cli.shared import add_global_flags, make_subparser
+from autopilot.cli.resolvers import add_global_flags, make_subparser
 from autopilot.core.trainer import Trainer
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -33,7 +33,7 @@ class Argument:
   def __init__(self, *flags: str, **kwargs: Any) -> None:
     self.flags: tuple[str, ...] = flags
     self.kwargs: dict[str, Any] = kwargs
-    self.attr_name: str = ''
+    self.attr_name: str | None = None
 
   def __set_name__(self, owner: type, name: str) -> None:
     self.attr_name = name
@@ -67,19 +67,17 @@ class SubcommandMeta:
   """Metadata attached to methods decorated with @subcommand."""
 
   name: str
-  help: str = ''
+  help: str | None = None
   arguments: list[tuple[tuple, dict]] = field(default_factory=list)
-  include_project_config: bool = True
 
 
-def subcommand(name: str, *, help: str = '', include_project_config: bool = True):
+def subcommand(name: str, *, help: str | None = None):
   """Mark a method as an inline subcommand (like @llm_step)."""
 
   def decorator(fn):
     fn._subcommand_meta = SubcommandMeta(
       name=name,
       help=help,
-      include_project_config=include_project_config,
     )
     return fn
 
@@ -132,13 +130,22 @@ def collect_subcommands(instance: object) -> list[tuple[SubcommandMeta, Any]]:
 class Command:
   """Recursive command node. Leaf or group determined by children, not type.
 
-  Like nn.Module: __setattr__ auto-registers child Commands.
-  Override forward() for leaf command logic.
+  Like nn.Module: __setattr__ auto-registers child Commands into _commands.
+  Override forward(ctx, args) for leaf command logic. Container commands
+  nest children and/or use @subcommand / @argument on methods for
+  inline handlers.
+
+  Registration model:
+    register(subparsers) walks children and attaches argparse parsers.
+    Declarative flags via Argument / Flag class attributes.
+    Inline subcommands via @subcommand + @argument decorators.
+
+  Name derivation: __init_subclass__ auto-derives name from class name
+  (strips 'Command' suffix, lowercases) if not explicitly set.
   """
 
-  name: str = ''
-  help: str = ''
-  include_project_config: bool = True
+  name: str | None = None
+  help: str | None = None
 
   def __init_subclass__(cls, **kwargs: Any) -> None:
     super().__init_subclass__(**kwargs)
@@ -179,7 +186,6 @@ class Command:
           child_sub,
           meta.name,
           meta.help,
-          include_project_config=meta.include_project_config,
         )
         for arg_flags, arg_kwargs in meta.arguments:
           sub_parser.add_argument(*arg_flags, **arg_kwargs)
@@ -189,7 +195,6 @@ class Command:
         subparsers,
         self.name,
         self.help,
-        include_project_config=self.include_project_config,
       )
       for arg_desc in collect_arguments(type(self)):
         arg_desc.add_to_parser(sub_parser)
@@ -225,7 +230,14 @@ class CLI:
   """Top-level CLI orchestrator. Like Trainer: __init__ configures, __call__ runs.
 
   Subclass for project CLIs. Use __init_subclass__(project='...') to
-  auto-register project CLI classes.
+  auto-register project CLI classes in _project_registry.
+
+  __init__ wires: self.module, self.generator, self.judge, and Command
+  instances as attributes. __call__ -> run() -> pre-parse --project /
+  --workspace -> optional project cli.py via runpy -> dispatch.
+
+  Project resolution order: --project / -p flag > CWD detection.
+  Entry point: AutoPilotCLI()() or MyCLI()().
   """
 
   prog: str = 'autopilot'
@@ -254,6 +266,7 @@ class CLI:
 
   def build_parser(self) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog=self.prog, description=self.description)
+    parser.set_defaults(handler=None)
     add_global_flags(parser)
     subparsers = parser.add_subparsers(dest='command', help='available commands')
     for _name, cmd in self._commands.items():
@@ -266,7 +279,7 @@ class CLI:
 
   def dispatch(self, ctx: Any, args: argparse.Namespace) -> None:
     """Dispatch to handler with error handling."""
-    handler = getattr(args, 'handler', None)
+    handler = args.handler
     if handler is None:
       self.build_parser().print_help()
       sys.exit(1)
@@ -284,7 +297,7 @@ class CLI:
   ) -> tuple[str, str, list[str]]:
     """Extract -p/--project and --workspace before full parse."""
     pre = argparse.ArgumentParser(add_help=False)
-    pre.add_argument('-p', '--project', default='')
+    pre.add_argument('-p', '--project', default=None)
     pre.add_argument('--workspace', default='.')
     known, remaining = pre.parse_known_args(argv)
     return known.project, known.workspace, remaining

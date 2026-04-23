@@ -1,9 +1,10 @@
 """Tests for Module base class (nn.Module pattern)."""
 
 from autopilot.core.metric import Metric
-from autopilot.core.models import Datum
 from autopilot.core.module import Module
 from autopilot.core.parameter import Parameter
+from autopilot.core.types import Datum
+from helpers import NumericGradient
 import pytest
 
 
@@ -297,7 +298,7 @@ class TestModuleStateDict:
     parent.layer = child
 
     state = parent.state_dict()
-    p.grad = 'some_gradient'
+    p.grad = NumericGradient(value=1.0)
 
     parent2 = Module()
     child2 = Module()

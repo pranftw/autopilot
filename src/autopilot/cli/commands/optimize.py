@@ -7,24 +7,22 @@ are the Trainer's responsibility.
 
 from autopilot.cli.command import Argument, Command, argument, subcommand
 from autopilot.cli.context import CLIContext
-from autopilot.core.checkpoints import load_checkpoint
+from autopilot.core.callbacks.cost import CostTrackerCallback
+from autopilot.core.callbacks.data_recorder import DataRecorderCallback
+from autopilot.core.callbacks.diagnostics import DiagnosticsCallback
+from autopilot.core.callbacks.memory import MemoryCallback
+from autopilot.core.callbacks.run_state import RunStateCallback
 from autopilot.core.config import resolve_experiment_dir
-from autopilot.core.cost_tracker import CostTracker
-from autopilot.core.decisions import is_decided
+from autopilot.core.diagnostics import Diagnostics
 from autopilot.core.errors import PreflightError
 from autopilot.core.hyperparams import load_hyperparams, update_hyperparams
+from autopilot.core.loops.orchestrator import EpochOrchestrator, OrchestratorConfig
 from autopilot.core.memory import FileMemory
-from autopilot.core.orchestrator import EpochOrchestrator, OrchestratorConfig
-from autopilot.core.stage_callbacks import (
-  DiagnoseCallback,
-  EpochRecorderCallback,
-  MemoryCallback,
-  RegressionCallback,
-  RunStateCallback,
-)
 from autopilot.core.summary import build_experiment_summary, write_experiment_summary
 from autopilot.core.trainer import Trainer
 from autopilot.tracking.commands import create_command_record, log_command
+from autopilot.tracking.io import read_json
+from autopilot.tracking.manifest import load_manifest
 from pathlib import Path
 from typing import Any
 import argparse
@@ -43,6 +41,7 @@ class Train(Command):
   )
 
   def forward(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Run training on the specified split with optional item limit."""
     split = ctx.split or 'train'
     limit = args.limit
     exp_dir = _resolve_experiment(ctx)
@@ -71,6 +70,7 @@ class Deploy(Command):
   help = 'Deploy experiment artifacts'
 
   def forward(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Deploy experiment artifacts and capture the deploy ID."""
     exp_dir = _resolve_experiment(ctx)
     _get_trainer(ctx)
 
@@ -85,7 +85,7 @@ class Deploy(Command):
     observation = ctx.module(runtime_ctx, params)
 
     if observation.success:
-      extracted = observation.metadata.get('extracted_value', '')
+      extracted = observation.metadata.get('extracted_value')
       if extracted:
         ctx.output.info(f'Captured deploy ID: {extracted}')
       elif not ctx.dry_run:
@@ -102,6 +102,7 @@ class Validate(Command):
   help = 'Run validation'
 
   def forward(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Run validation on the val split."""
     exp_dir = _resolve_experiment(ctx)
     _get_trainer(ctx)
 
@@ -128,6 +129,7 @@ class Test(Command):
   help = 'Run test split'
 
   def forward(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Run the test split and report success."""
     exp_dir = _resolve_experiment(ctx)
     _get_trainer(ctx)
 
@@ -159,6 +161,7 @@ class OptimizeCommand(Command):
 
   @subcommand('preflight', help='Run preflight checks')
   def preflight(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Run preflight checks on all module children that support them."""
     exp_dir = _resolve_experiment(ctx)
     _get_trainer(ctx)
 
@@ -190,12 +193,13 @@ class OptimizeCommand(Command):
 
   @argument(
     '--values',
-    default='',
+    default=None,
     metavar='JSON',
     help='JSON string of hyperparameter key=value pairs',
   )
   @subcommand('set-hparams', help='Apply hyperparameter updates')
   def set_hparams(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Apply hyperparameter updates from JSON string or file."""
     exp_dir = _resolve_experiment(ctx)
     ctx.output.info('Setting hyperparameters...')
 
@@ -203,8 +207,9 @@ class OptimizeCommand(Command):
     if args.values:
       updates = json.loads(args.values)
     elif ctx.hyperparams_file:
-      with open(ctx.hyperparams_file) as f:
-        updates = json.load(f)
+      loaded = read_json(Path(ctx.hyperparams_file))
+      if loaded and isinstance(loaded, dict):
+        updates = loaded
 
     if not updates:
       ctx.output.warn('no hyperparameter updates provided')
@@ -229,17 +234,18 @@ class OptimizeCommand(Command):
   )
   @subcommand('loop', help='Run optimization loop')
   def loop(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Run the full optimization loop with orchestration and callbacks."""
     exp_dir = _resolve_experiment(ctx)
     trainer = _get_trainer(ctx)
 
     ctx.output.info('Starting optimization loop...')
-    checkpoint = load_checkpoint(exp_dir)
+    checkpoint = load_manifest(exp_dir, strict=False)
     if not checkpoint:
       ctx.output.warn('no manifest found; create experiment first')
       ctx.output.result({'error': 'no_experiment'}, ok=False)
       return
 
-    if is_decided(checkpoint):
+    if checkpoint.is_decided:
       ctx.output.info(f'experiment already decided: {checkpoint.decision}')
       ctx.output.result(
         {
@@ -256,11 +262,10 @@ class OptimizeCommand(Command):
     orchestrator = EpochOrchestrator(config=orch_config)
 
     memory = FileMemory(exp_dir)
-    cost_tracker = CostTracker(exp_dir)
+    cost_tracker = CostTrackerCallback(exp_dir)
     stage_cbs = [
-      EpochRecorderCallback(exp_dir),
-      RegressionCallback(exp_dir),
-      DiagnoseCallback(exp_dir),
+      DataRecorderCallback(exp_dir),
+      DiagnosticsCallback(Diagnostics(exp_dir)),
       MemoryCallback(memory),
       RunStateCallback(exp_dir),
       cost_tracker,
@@ -273,7 +278,7 @@ class OptimizeCommand(Command):
       dry_run=trainer.dry_run,
       logger=trainer.logger,
       policy=trainer.policy,
-      store=trainer.store,
+      experiment=trainer.experiment,
       accumulate_grad_batches=trainer.accumulate_grad_batches,
     )
 
@@ -297,7 +302,7 @@ class OptimizeCommand(Command):
         'final_metrics': summary.final_metrics,
         'best_epoch': summary.best_epoch,
         'stop_reason': result.get('stop_reason'),
-        'regressions': len(summary.regressions),
+        'comparisons': len(summary.comparisons),
         'memory_entries': summary.memory_entries,
       }
     )

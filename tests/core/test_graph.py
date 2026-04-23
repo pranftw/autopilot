@@ -1,5 +1,6 @@
 """Tests for computation graph: Node, Graph, AccumulateGrad, context managers."""
 
+from autopilot.core.gradient import Gradient
 from autopilot.core.graph import (
   AccumulateGrad,
   Graph,
@@ -13,11 +14,14 @@ from autopilot.core.graph import (
   is_grad_enabled,
   no_grad,
 )
-from autopilot.core.models import Datum
 from autopilot.core.module import Module
 from autopilot.core.parameter import Parameter
+from autopilot.core.types import Datum
 from collections import OrderedDict
 from contextvars import copy_context
+from dataclasses import dataclass
+from helpers import NumericGradient
+import pytest
 
 
 class TestNodeBasics:
@@ -73,15 +77,15 @@ class TestAccumulateGrad:
     p = Parameter(requires_grad=True)
     acc = AccumulateGrad(p, sequence_nr=0)
     assert acc.name() == 'AccumulateGrad'
-    acc.apply(10)
-    assert p.grad == 10
+    acc.apply(NumericGradient(value=10))
+    assert p.grad.value == 10
 
   def test_accumulate_adds_to_existing(self) -> None:
     p = Parameter(requires_grad=True)
-    p.grad = 5
+    p.grad = NumericGradient(value=5)
     acc = AccumulateGrad(p, sequence_nr=0)
-    acc.apply(3)
-    assert p.grad == 8
+    acc.apply(NumericGradient(value=3))
+    assert p.grad.value == 8
 
   def test_accumulate_none_grad_noop(self) -> None:
     p = Parameter(requires_grad=True)
@@ -92,19 +96,43 @@ class TestAccumulateGrad:
   def test_multiple_accumulations(self) -> None:
     p = Parameter(requires_grad=True)
     acc = AccumulateGrad(p, sequence_nr=0)
-    acc.apply(1)
-    acc.apply(2)
-    acc.apply(3)
-    assert p.grad == 6
+    acc.apply(NumericGradient(value=1))
+    acc.apply(NumericGradient(value=2))
+    acc.apply(NumericGradient(value=3))
+    assert p.grad.value == 6
 
   def test_zero_grad_then_accumulate(self) -> None:
     p = Parameter(requires_grad=True)
     acc = AccumulateGrad(p, sequence_nr=0)
-    acc.apply(5)
-    assert p.grad == 5
+    acc.apply(NumericGradient(value=5))
+    assert p.grad.value == 5
     p.grad = None
-    acc.apply(3)
-    assert p.grad == 3
+    acc.apply(NumericGradient(value=3))
+    assert p.grad.value == 3
+
+  def test_accumulate_grad_non_gradient_raises(self) -> None:
+    p = Parameter(requires_grad=True)
+    acc = AccumulateGrad(p, sequence_nr=0)
+    acc.apply('not a gradient')
+    with pytest.raises(AttributeError):
+      acc.apply(NumericGradient(value=1))
+
+  def test_accumulate_grad_mismatched_gradient_types(self) -> None:
+    @dataclass
+    class OtherGradient(Gradient):
+      label: str = ''
+
+      def accumulate(self, other: 'OtherGradient') -> 'OtherGradient':
+        return OtherGradient(label=self.label + other.label)
+
+      def render(self) -> str:
+        return self.label
+
+    p = Parameter(requires_grad=True)
+    acc = AccumulateGrad(p, sequence_nr=0)
+    acc.apply(NumericGradient(value=1))
+    with pytest.raises(AttributeError):
+      acc.apply(OtherGradient(label='x'))
 
 
 class TestGraph:
@@ -146,8 +174,8 @@ class TestBackward:
     g._nodes.append(acc)
     n1 = g.record(None, (), None, [(acc, 0)])
     n2 = g.record(None, (), None, [(n1, 0)])
-    g.backward(n2, grad=1.0)
-    assert p.grad == 1.0
+    g.backward(n2, grad=NumericGradient(value=1.0))
+    assert p.grad.value == 1.0
 
   def test_diamond_dag_accumulates(self) -> None:
     p = Parameter(requires_grad=True)
@@ -159,7 +187,7 @@ class TestBackward:
     merge = g.record(None, (), None, [(left, 0), (right, 0)])
 
     merge.apply = lambda *grads: (grads[0], grads[0]) if grads else ()
-    g.backward(merge, grad=1.0)
+    g.backward(merge, grad=NumericGradient(value=1.0))
     assert p.grad is not None
 
   def test_backward_resets_by_default(self) -> None:

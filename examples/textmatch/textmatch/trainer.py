@@ -1,6 +1,10 @@
 from autopilot.ai.store import FileStore
-from autopilot.core.models import GateResult, Result
-from autopilot.core.store_callbacks import StoreCheckpoint
+from autopilot.core.callbacks.store import StoreCheckpointCallback
+from autopilot.core.checkpoint import JSONCheckpoint
+from autopilot.core.experiment import Experiment
+from autopilot.core.logger import JSONLogger
+from autopilot.core.models import Result
+from autopilot.core.types import GateResult
 from autopilot.core.trainer import Trainer
 from autopilot.policy.policy import Policy
 from pathlib import Path
@@ -39,14 +43,23 @@ def build_trainer(
   module: TextMatchModule,
   store_path: Path,
   dry_run: bool = False,
+  experiment_dir: Path | None = None,
 ) -> tuple[Trainer, FileStore]:
   slug = next_slug(store_path)
   store = FileStore(store_path, slug, list(module.parameters()))
   policy = AccuracyPolicy(threshold=0.30)
-  trainer = Trainer(
-    callbacks=[StoreCheckpoint(store)],
-    policy=policy,
+  exp_dir = experiment_dir or store_path / slug
+  experiment = Experiment(
+    exp_dir,
+    slug=slug,
+    logger=JSONLogger(exp_dir),
+    checkpoint=JSONCheckpoint(),
     store=store,
+  )
+  trainer = Trainer(
+    callbacks=[StoreCheckpointCallback()],
+    policy=policy,
+    experiment=experiment,
     dry_run=dry_run,
     accumulate_grad_batches=100,
   )

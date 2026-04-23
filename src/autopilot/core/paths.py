@@ -1,3 +1,9 @@
+"""Centralized path computation for the autopilot workspace.
+
+Every directory name string appears exactly once here. Callers never join paths
+themselves -- they call a function from this module instead.
+"""
+
 from pathlib import Path
 
 

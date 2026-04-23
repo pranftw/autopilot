@@ -84,12 +84,15 @@ class Output:
     widths = {col: len(col) for col in columns}
     for row in rows:
       for col in columns:
-        widths[col] = max(widths[col], len(str(row.get(col, ''))))
+        cell = row.get(col)
+        widths[col] = max(widths[col], len(str(cell) if cell is not None else ''))
     header = '  '.join(col.ljust(widths[col]) for col in columns)
     print(header)
     print('  '.join('-' * widths[col] for col in columns))
     for row in rows:
-      line = '  '.join(str(row.get(col, '')).ljust(widths[col]) for col in columns)
+      line = '  '.join(
+        (str(row[col]) if row.get(col) is not None else '').ljust(widths[col]) for col in columns
+      )
       print(line)
 
   def flush_json(self) -> None:

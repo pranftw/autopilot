@@ -1,4 +1,4 @@
-from autopilot.core.models import Datum
+from autopilot.core.types import Datum
 from autopilot.data.dataloader import DataLoader
 from autopilot.data.datamodule import DataModule
 from autopilot.data.dataset import Dataset
@@ -18,11 +18,12 @@ class TextMatchDataset(Dataset):
 
   def __getitem__(self, index: int) -> Datum:
     item = self._items[index]
+    label = item.get('metadata', {}).get('label', '')
     return Datum(
-      item_id=item['item_id'],
       metadata={
         'text': item['text'],
         'expected': item['expected_category'],
+        'label': label,
       },
     )
 

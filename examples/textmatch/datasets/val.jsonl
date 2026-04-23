@@ -1,5 +1,5 @@
-{"item_id": "val_1", "text": "I was overcharged $15 on my last bill", "expected_category": "billing"}
-{"item_id": "val_2", "text": "Getting timeout errors on the login page", "expected_category": "technical"}
-{"item_id": "val_3", "text": "What are your customer service hours?", "expected_category": "general"}
-{"item_id": "val_4", "text": "I need to update my phone number on my account", "expected_category": "account"}
-{"item_id": "val_5", "text": "When will my replacement item ship?", "expected_category": "shipping"}
+{"text": "I was overcharged $15 on my last bill", "expected_category": "billing", "metadata": {"label": "val_1"}}
+{"text": "Getting timeout errors on the login page", "expected_category": "technical", "metadata": {"label": "val_2"}}
+{"text": "What are your customer service hours?", "expected_category": "general", "metadata": {"label": "val_3"}}
+{"text": "I need to update my phone number on my account", "expected_category": "account", "metadata": {"label": "val_4"}}
+{"text": "When will my replacement item ship?", "expected_category": "shipping", "metadata": {"label": "val_5"}}

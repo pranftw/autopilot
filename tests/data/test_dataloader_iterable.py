@@ -1,7 +1,8 @@
 """Tests for IterableDataset + EpochLoop integration."""
 
-from autopilot.core.loops import EpochLoop, LoopConfig
-from autopilot.core.models import Datum
+from autopilot.core.loops.epoch import EpochLoop
+from autopilot.core.loops.loop import LoopConfig
+from autopilot.core.types import Datum
 from autopilot.data.dataloader import DataLoader
 from autopilot.data.dataset import IterableDataset
 from unittest.mock import MagicMock
@@ -27,11 +28,8 @@ def _make_trainer(module=None):
   m = module or MagicMock()
   m.return_value = Datum()
   trainer.module = m
-  trainer._store = None
-  trainer._policy = None
-  trainer._best_epoch = 0
-  trainer._last_val_metrics = None
-  trainer.regression_detected = False
+  trainer.policy = None
+  trainer.experiment = None
   trainer.should_stop_at = MagicMock(return_value=False)
   trainer._dispatch = MagicMock()
   return trainer

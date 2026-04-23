@@ -1,10 +1,10 @@
 """Tests for Trainer construction, callback dispatch, and fit()."""
 
-from autopilot.core.callbacks import Callback
+from autopilot.core.callbacks.callback import Callback
 from autopilot.core.logger import Logger
-from autopilot.core.models import Datum
 from autopilot.core.module import Module
 from autopilot.core.trainer import Trainer
+from autopilot.core.types import Datum
 
 
 class _StubModule(Module):
@@ -32,7 +32,7 @@ class TestTrainerConstruction:
 
   def test_no_run_method(self) -> None:
     trainer = Trainer()
-    assert not hasattr(trainer, 'run') or not callable(getattr(trainer, 'run', None))
+    assert not hasattr(trainer, 'run') or not callable(trainer.run)
 
   def test_fit_sets_module_ref(self) -> None:
     mod = _StubModule()
@@ -100,3 +100,9 @@ class TestTrainerRunLoopViaFit:
     result = trainer.fit(mod, max_epochs=2)
     assert result['total_epochs'] == 2
     assert epochs == [('start', 1), ('end', 1), ('start', 2), ('end', 2)]
+
+
+class TestTrainerProperties:
+  def test_trainer_optimizer_none_before_fit(self):
+    trainer = Trainer()
+    assert trainer.optimizer is None

@@ -1,38 +1,34 @@
-"""Dataset registry and split operations: list, validate, materialize, and seed."""
+"""Dataset registry and split operations: list, show, split, and seed.
+
+Workspace commands for managing dataset directories and inspecting
+split naming conventions used by the project.
+"""
 
 from autopilot.cli.command import Argument, Command, subcommand
 from autopilot.cli.context import CLIContext
-from autopilot.core.datasets import create_dataset_snapshot, validate_dataset
-from autopilot.core.errors import DatasetError
 import argparse
 
 
-def _dataset_profile_config(ctx: CLIContext) -> dict:
-  """Profile-style dict with datasets.splits from the project Module."""
-  if not ctx.module:
-    raise DatasetError(
-      'dataset validate/materialize require ctx.module (project CLI with module=)',
-    )
-  cfg = getattr(ctx.module, 'dataset_profile_config', None)
-  if not isinstance(cfg, dict):
-    raise DatasetError(
-      'Module must set dataset_profile_config to a dict containing datasets.splits',
-    )
-  return cfg
-
-
 class DatasetSplit(Command):
+  """Inspect or validate a dataset split name.
+
+  Currently validates that the split name resolves. Future: validate
+  that the split directory contains expected files, check row counts,
+  and verify content hashes against the dataset registry.
+  """
+
   name = 'split'
   help = 'Inspect or validate split naming'
   split_name = Argument(
     'split_name',
     nargs='?',
-    default='',
+    default=None,
     metavar='SPLIT',
     help='split name (defaults to --split)',
   )
 
   def forward(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Resolve and report the split name."""
     raw = args.split_name or ctx.split
     if not raw:
       ctx.output.info('No split specified.')
@@ -51,6 +47,7 @@ class DatasetCommand(Command):
 
   @subcommand('list', help='List dataset split directories')
   def list(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """List top-level dataset directories under the datasets root."""
     ctx.output.info('Listing dataset layout...')
     base = ctx.datasets_dir
     if not base.exists():
@@ -61,29 +58,14 @@ class DatasetCommand(Command):
 
   @subcommand('show', help='Show dataset directory context')
   def show(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Show context for the current or named dataset."""
     name = ctx.dataset or 'default'
     ctx.output.info(f'Showing dataset context for {name!r}...')
     ctx.output.result({'dataset': name, 'datasets_dir': str(ctx.datasets_dir)})
 
-  @subcommand('validate', help='Validate dataset splits from module config')
-  def validate(self, ctx: CLIContext, args: argparse.Namespace) -> None:
-    ctx.output.info('Validating datasets against module.dataset_profile_config...')
-    cfg = _dataset_profile_config(ctx)
-    entries = validate_dataset(ctx.workspace, cfg)
-    rows = [{'name': e.name, 'split': e.split, 'rows': e.rows} for e in entries]
-    ctx.output.table(rows, ['name', 'split', 'rows'])
-    ctx.output.result({'validated': len(entries)})
-
-  @subcommand('materialize', help='Materialize dataset snapshot metadata')
-  def materialize(self, ctx: CLIContext, args: argparse.Namespace) -> None:
-    ctx.output.info('Materializing dataset snapshot (metadata only)...')
-    cfg = _dataset_profile_config(ctx)
-    entries = validate_dataset(ctx.workspace, cfg)
-    snapshot = create_dataset_snapshot(entries)
-    ctx.output.result({'entries': len(snapshot.entries), 'created_at': snapshot.created_at})
-
   @subcommand('seed', help='Seed dataset layout under autopilot/datasets')
   def seed(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Create train/val/test split directories under the datasets root."""
     ctx.output.info('Seeding dataset directories...')
     base = ctx.datasets_dir
     for sub in ('train', 'val', 'test'):

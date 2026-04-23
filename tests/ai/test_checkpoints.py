@@ -1,6 +1,6 @@
-"""Tests for autopilot.ai.checkpoints."""
+"""Tests for autopilot.ai.evaluation.checkpoints."""
 
-from autopilot.ai.checkpoints import CheckpointIO, CheckpointManager
+from autopilot.ai.evaluation.checkpoints import CheckpointIO, CheckpointManager
 from autopilot.core.errors import AIError
 from pathlib import Path
 from pydantic import BaseModel
@@ -10,7 +10,7 @@ import pytest
 
 class _Mini(BaseModel):
   type: str = 'result'
-  item_id: str = 'id'
+  id: str = 'test-id'
   timestamp: str = 't'
   payload: dict
 
@@ -112,7 +112,7 @@ class TestCheckpointManager:
     loaded = CheckpointIO().load(path)
     assert len(loaded) == 1
     assert loaded[0]['type'] == 'ping'
-    assert loaded[0]['item_id'] == 'x'
+    assert loaded[0]['id'] == 'x'
     assert loaded[0]['payload']['k'] == 1
 
   def test_is_completed_result_type(self, tmp_path: Path) -> None:
@@ -256,4 +256,4 @@ class TestCustomCheckpointIO:
     key = str(path.resolve())
     assert key in io._store
     assert len(io._store[key]) == 1
-    assert io._store[key][0]['item_id'] == 'z'
+    assert io._store[key][0]['id'] == 'z'

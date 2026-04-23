@@ -1,15 +1,15 @@
-"""Tests for DataGenerator base class."""
+"""Tests for GeneratorAgent base class."""
 
-from autopilot.ai.checkpoints import CheckpointManager
-from autopilot.ai.generator import DataGenerator
-from autopilot.ai.models import (
+from autopilot.ai.evaluation.checkpoints import CheckpointManager
+from autopilot.ai.evaluation.generator import GeneratorAgent
+from autopilot.ai.evaluation.schemas import (
   ConversationTurn,
   DataItem,
   GeneratorConfig,
   RetryConfig,
   RunConfig,
 )
-from autopilot.ai.steps import PythonStep
+from autopilot.ai.evaluation.steps import PythonStep
 from autopilot.cli.output import Output
 from autopilot.data.dataset import ListDataset
 from pathlib import Path
@@ -50,7 +50,7 @@ def _make_config(total: int = 5) -> GeneratorConfig[StubGenConfig]:
   )
 
 
-class StubGenerator(DataGenerator[StubGenConfig, StubCustom]):
+class StubGenerator(GeneratorAgent[StubGenConfig, StubCustom]):
   def create_slots(self, config):
     return [{'id': f'S{i:04d}'} for i in range(config.total_count)]
 
@@ -68,9 +68,9 @@ class StubGenerator(DataGenerator[StubGenConfig, StubCustom]):
     return 'default'
 
 
-class TestDataGeneratorAbstract:
+class TestGeneratorAgentAbstract:
   def test_cannot_instantiate(self) -> None:
-    gen = DataGenerator()
+    gen = GeneratorAgent()
     with pytest.raises(NotImplementedError):
       gen.create_slots(_make_config())
 
@@ -98,7 +98,7 @@ class TestDryRun:
 
 class TestRun:
   @pytest.mark.asyncio
-  @patch('autopilot.ai.generator.run_step_workflow', new_callable=AsyncMock)
+  @patch('autopilot.ai.evaluation.generator.run_step_workflow', new_callable=AsyncMock)
   async def test_processes_all_slots(self, mock_workflow: AsyncMock, tmp_path: Path) -> None:
     mock_workflow.return_value = {'gen': {'value': 'mocked'}}
     out = Output()
@@ -108,14 +108,14 @@ class TestRun:
     assert len(lines) == 5
 
   @pytest.mark.asyncio
-  @patch('autopilot.ai.generator.run_step_workflow', new_callable=AsyncMock)
+  @patch('autopilot.ai.evaluation.generator.run_step_workflow', new_callable=AsyncMock)
   async def test_checkpoint_written(self, mock_workflow: AsyncMock, tmp_path: Path) -> None:
     mock_workflow.return_value = {'gen': {'value': 'mocked'}}
     await StubGenerator().async_run(_make_config(3), tmp_path, Output())
     assert (tmp_path / 'checkpoint.jsonl').is_file()
 
   @pytest.mark.asyncio
-  @patch('autopilot.ai.generator.run_step_workflow', new_callable=AsyncMock)
+  @patch('autopilot.ai.evaluation.generator.run_step_workflow', new_callable=AsyncMock)
   async def test_splits_assigned(self, mock_workflow: AsyncMock, tmp_path: Path) -> None:
     mock_workflow.return_value = {'gen': {'value': 'mocked'}}
     await StubGenerator().async_run(_make_config(5), tmp_path, Output())
@@ -124,7 +124,7 @@ class TestRun:
     assert (tmp_path / 'test.jsonl').is_file()
 
   @pytest.mark.asyncio
-  @patch('autopilot.ai.generator.run_step_workflow', new_callable=AsyncMock)
+  @patch('autopilot.ai.evaluation.generator.run_step_workflow', new_callable=AsyncMock)
   async def test_output_files_written(self, mock_workflow: AsyncMock, tmp_path: Path) -> None:
     mock_workflow.return_value = {'gen': {'value': 'mocked'}}
     await StubGenerator().async_run(_make_config(2), tmp_path, Output())
@@ -132,7 +132,7 @@ class TestRun:
     assert (tmp_path / 'metadata.json').is_file()
 
   @pytest.mark.asyncio
-  @patch('autopilot.ai.generator.run_step_workflow', new_callable=AsyncMock)
+  @patch('autopilot.ai.evaluation.generator.run_step_workflow', new_callable=AsyncMock)
   async def test_rejected_items_excluded(self, mock_workflow: AsyncMock, tmp_path: Path) -> None:
     mock_workflow.return_value = {'gen': {'value': 'mocked'}}
 
@@ -149,7 +149,7 @@ class TestRun:
 
 class TestResume:
   @pytest.mark.asyncio
-  @patch('autopilot.ai.generator.run_step_workflow', new_callable=AsyncMock)
+  @patch('autopilot.ai.evaluation.generator.run_step_workflow', new_callable=AsyncMock)
   async def test_skips_completed_slots(self, mock_workflow: AsyncMock, tmp_path: Path) -> None:
     ckpt_path = tmp_path / 'checkpoint.jsonl'
     ckpt = CheckpointManager(ckpt_path)

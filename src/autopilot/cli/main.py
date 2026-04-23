@@ -5,23 +5,22 @@ Project dispatch is internal to CLI.run() via __init_subclass__ registry.
 """
 
 from autopilot.cli.command import CLI
-from autopilot.cli.commands.agent_cmd import AgentCommand
+from autopilot.cli.commands.agent import AgentCommand
 from autopilot.cli.commands.ai import AICommand
 from autopilot.cli.commands.dataset import DatasetCommand
 from autopilot.cli.commands.debug import DebugCommand
-from autopilot.cli.commands.diagnose_cmd import DiagnoseCommand
+from autopilot.cli.commands.diagnose import DiagnoseCommand
 from autopilot.cli.commands.experiment import ExperimentCommand
-from autopilot.cli.commands.judge_cmd import JudgeCommand
-from autopilot.cli.commands.memory_cmd import MemoryCommand
+from autopilot.cli.commands.memory import MemoryCommand
 from autopilot.cli.commands.optimize import OptimizeCommand
 from autopilot.cli.commands.policy import PolicyCommand
-from autopilot.cli.commands.project_cmd import ProjectCommand
+from autopilot.cli.commands.project import ProjectCommand
 from autopilot.cli.commands.promote import PromoteCommand
-from autopilot.cli.commands.propose_cmd import ProposeCommand
+from autopilot.cli.commands.propose import ProposeCommand
 from autopilot.cli.commands.report import ReportCommand
-from autopilot.cli.commands.status_cmd import StatusCommand
-from autopilot.cli.commands.store_cmd import StoreCommand
-from autopilot.cli.commands.trace_cmd import TraceCommand
+from autopilot.cli.commands.status import StatusCommand
+from autopilot.cli.commands.store import StoreCommand
+from autopilot.cli.commands.trace import TraceCommand
 from autopilot.cli.commands.workspace import WorkspaceCommand
 from autopilot.cli.context import CLIContext
 from pathlib import Path
@@ -48,7 +47,6 @@ class AutoPilotCLI(CLI):
     self.promote = PromoteCommand()
     self.store = StoreCommand()
     self.status = StatusCommand()
-    self.judge = JudgeCommand()
     self.diagnose = DiagnoseCommand()
     self.trace = TraceCommand()
     self.propose = ProposeCommand()
@@ -58,7 +56,7 @@ class AutoPilotCLI(CLI):
 
 def _dispatch(ctx: CLIContext, args: argparse.Namespace) -> None:
   """Shared handler dispatch with error handling."""
-  handler = getattr(args, 'handler', None)
+  handler = args.handler
   if handler is None:
     build_parser().print_help()
     sys.exit(1)

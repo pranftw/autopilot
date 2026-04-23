@@ -1,6 +1,6 @@
 """Lightning-style Trainer.fit() for agent-optimized prompt tuning.
 
-Demonstrates: AutoPilotModule, Trainer, Policy, Store, StoreCheckpoint,
+Demonstrates: AutoPilotModule, Trainer, Policy, Store, StoreCheckpointCallback,
 ClaudeCodeAgent -- same components as run.py but orchestrated by Trainer.
 Requires: claude CLI installed.
 """

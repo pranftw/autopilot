@@ -12,8 +12,8 @@ from autopilot.core.graph import (
   get_current_graph,
   is_grad_enabled,
 )
-from autopilot.core.models import Datum
 from autopilot.core.parameter import Parameter
+from autopilot.core.types import Datum
 from collections import OrderedDict
 from typing import Any, Iterator
 
@@ -21,12 +21,28 @@ from typing import Any, Iterator
 class Module:
   """Base class for experiment modules. Like nn.Module.
 
-  Child Modules and Parameters are auto-registered via __setattr__,
-  exactly like nn.Module auto-registers child modules and parameters.
-  Metric(Module) and Loss(Module) go into _modules as child modules.
+  Registration semantics:
+    __setattr__ auto-registers: Parameter -> _parameters, child Module -> _modules.
+    There is no separate _metrics dict. Metric(Module) and Loss(Module) live in
+    _modules as regular child modules.
 
-  Override forward() for custom computation -- the single uniform
-  entry point, like nn.Module.forward().
+  Tree traversal API (mirrors nn.Module):
+    children(), named_children()             -- immediate children
+    modules(), named_modules()               -- full tree (self + descendants)
+    parameters(), named_parameters()         -- all Parameter leaves
+    train(mode), eval()                      -- toggle training flag recursively
+    apply(fn)                                -- post-order fn application
+    state_dict(), load_state_dict()          -- checkpoint serialization
+
+  Computation:
+    Override forward(*args, **kwargs) -> Datum. Invoked through __call__,
+    which also runs pre/post hooks and records to the computation graph
+    when grad mode is enabled.
+
+  Hooks:
+    register_forward_pre_hook(fn)  -- called before forward()
+    register_forward_hook(fn)      -- called after forward()
+    Returns a RemovableHandle for later detachment.
 
   Example::
 
@@ -197,17 +213,17 @@ class Module:
         state[f'{name}.{key}'] = value
     return state
 
-  def load_state_dict(self, state: dict[str, Any]) -> None:
+  def load_state_dict(self, state_dict: dict[str, Any]) -> None:
     """Load module state from checkpoint. Like nn.Module.load_state_dict()."""
     for name, param in self._parameters.items():
-      if name in state:
-        loaded = Parameter.from_dict(state[name])
+      if name in state_dict:
+        loaded = Parameter.from_dict(state_dict[name])
         param.requires_grad = loaded.requires_grad
         param.grad = loaded.grad
     for name, child in self._modules.items():
       child_state = {}
       prefix = f'{name}.'
-      for key, value in state.items():
+      for key, value in state_dict.items():
         if key.startswith(prefix):
           child_state[key[len(prefix) :]] = value
       if child_state:
@@ -239,8 +255,25 @@ class Module:
 class AutoPilotModule(Module):
   """Module with step methods and lifecycle hooks. Like LightningModule.
 
-  Subclass of Module. Adds training_step, validation_step, test_step,
-  configure_optimizers, and lifecycle hooks. Used with Trainer.
+  Extends Module with the Trainer integration surface. The Trainer calls
+  these methods during fit(); users override them.
+
+  Step methods (override for custom behavior):
+    training_step(batch)       -- called per train batch
+    validation_step(batch)     -- called per validation batch
+    test_step(batch)           -- called per test batch
+    configure_optimizers()     -- return an Optimizer (or dict with 'optimizer' key)
+
+  Lifecycle hooks (called by Trainer/EpochLoop):
+    setup()                    -- before training starts
+    teardown()                 -- after training ends
+    on_train_start()           -- before first train batch
+    on_train_end()             -- after last train batch
+    on_validation_start()      -- before first val batch
+    on_validation_end()        -- after last val batch
+
+  Properties:
+    trainer                    -- reference to the Trainer, set by Trainer.fit()
 
   Example::
 
@@ -248,7 +281,7 @@ class AutoPilotModule(Module):
       def __init__(self):
         super().__init__()
         self.backend = BackendModule(...)
-        self.loss = JudgeLoss(judge=MyJudge())
+        self.loss = JudgeLoss(judge=MyJudge(), collator=ConcatCollator())
         self.metrics = AccuracyMetric()
 
       def forward(self, batch):

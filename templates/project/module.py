@@ -1,4 +1,4 @@
-from autopilot.core.models import Datum
+from autopilot.core.types import Datum
 from autopilot.core.module import AutoPilotModule
 
 

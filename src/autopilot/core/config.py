@@ -1,21 +1,21 @@
 """Canonical config helpers for JSON overrides and path resolution."""
 
-from autopilot.core.errors import ConfigError
+from autopilot.core.errors import ConfigError, TrackingError
+from autopilot.tracking.io import read_json
 from pathlib import Path
 from typing import Any
 import autopilot.core.paths as paths
-import json
 
 
 def load_json(path: Path) -> dict[str, Any]:
   """Load a JSON file and return its contents as a dict."""
-  if not path.exists():
-    raise ConfigError(f'config file not found: {path}')
   try:
-    with open(path) as f:
-      return json.load(f)
-  except json.JSONDecodeError as e:
-    raise ConfigError(f'invalid JSON in {path}: {e}') from e
+    data = read_json(path)
+  except TrackingError as exc:
+    raise ConfigError(str(exc)) from exc
+  if data is None:
+    raise ConfigError(f'config file not found: {path}')
+  return data
 
 
 def resolve_experiment_dir(
@@ -25,11 +25,6 @@ def resolve_experiment_dir(
 ) -> Path:
   """Return the experiment directory path for a given slug."""
   return paths.experiment(workspace, slug, project)
-
-
-def resolve_records_dir(workspace: Path, project: str | None = None) -> Path:
-  """Return the records directory path."""
-  return paths.records(workspace, project)
 
 
 def list_projects(workspace: Path) -> list[str]:

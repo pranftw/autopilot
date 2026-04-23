@@ -6,9 +6,7 @@ Uses Experiment class for creation, load_manifest for listing.
 from autopilot.cli.command import Argument, Command, subcommand
 from autopilot.cli.context import CLIContext
 from autopilot.core.checkpoint import JSONCheckpoint
-from autopilot.core.checkpoints import load_checkpoint
 from autopilot.core.config import resolve_experiment_dir
-from autopilot.core.decisions import is_decided
 from autopilot.core.errors import TrackingError
 from autopilot.core.experiment import Experiment
 from autopilot.core.logger import JSONLogger
@@ -19,15 +17,17 @@ import argparse
 class ExperimentCreate(Command):
   name = 'create'
   help = 'Create a new experiment'
-  slug = Argument('--slug', default='', help='experiment slug')
-  idea = Argument('--idea', default='', help='short idea label')
-  title = Argument('--title', default='', help='experiment title')
-  hypothesis = Argument('--hypothesis', default='', help='hypothesis under test')
+  slug = Argument('--slug', default=None, help='experiment slug')
+  idea = Argument('--idea', default=None, help='short idea label')
+  title = Argument('--title', default=None, help='experiment title')
+  hypothesis = Argument('--hypothesis', default=None, help='hypothesis under test')
 
   def forward(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Create a new experiment directory with manifest and event log."""
     slug = args.slug or ctx.experiment
     if not slug:
-      raise ValueError('experiment slug required (--slug or --experiment)')
+      ctx.output.error('experiment slug required (--slug or --experiment)')
+      return
 
     ctx.output.info(f'Creating experiment {slug!r}...')
     exp_dir = resolve_experiment_dir(ctx.workspace, slug, ctx.project)
@@ -58,6 +58,7 @@ class ExperimentCommand(Command):
 
   @subcommand('list', help='List experiments')
   def list(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """List all experiments with their decision status."""
     ctx.output.info('Listing experiments...')
     root = ctx.experiments_dir
     if not root.exists():
@@ -81,9 +82,11 @@ class ExperimentCommand(Command):
 
   @subcommand('show', help='Show experiment details')
   def show(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Display the full experiment manifest."""
     slug = ctx.experiment
     if not slug:
-      raise ValueError('experiment slug required (--experiment)')
+      ctx.output.error('experiment slug required (--experiment)')
+      return
     exp_dir = resolve_experiment_dir(ctx.workspace, slug, ctx.project)
     if not exp_dir.exists():
       ctx.output.result({'slug': slug, 'exists': False}, ok=False)
@@ -93,11 +96,13 @@ class ExperimentCommand(Command):
 
   @subcommand('status', help='Show experiment status')
   def status(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Show experiment epoch and decision status."""
     slug = ctx.experiment
     if not slug:
-      raise ValueError('experiment slug required (--experiment)')
+      ctx.output.error('experiment slug required (--experiment)')
+      return
     exp_dir = resolve_experiment_dir(ctx.workspace, slug, ctx.project)
-    checkpoint = load_checkpoint(exp_dir)
+    checkpoint = load_manifest(exp_dir, strict=False)
     if not checkpoint:
       ctx.output.result({'slug': slug, 'exists': False}, ok=False)
       return
@@ -111,15 +116,17 @@ class ExperimentCommand(Command):
 
   @subcommand('resume', help='Resume an experiment run')
   def resume(self, ctx: CLIContext, args: argparse.Namespace) -> None:
+    """Check if an experiment is resumable and report its state."""
     slug = ctx.experiment
     if not slug:
-      raise ValueError('experiment slug required (--experiment)')
+      ctx.output.error('experiment slug required (--experiment)')
+      return
     exp_dir = resolve_experiment_dir(ctx.workspace, slug, ctx.project)
-    checkpoint = load_checkpoint(exp_dir)
+    checkpoint = load_manifest(exp_dir, strict=False)
     if not checkpoint:
       ctx.output.result({'slug': slug, 'error': 'no manifest found'}, ok=False)
       return
-    if is_decided(checkpoint):
+    if checkpoint.is_decided:
       ctx.output.result(
         {
           'slug': slug,

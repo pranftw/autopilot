@@ -26,7 +26,7 @@ class Logger:
   def log_hyperparams(self, params: dict) -> None:
     raise NotImplementedError
 
-  def log(self, event_type: str, message: str = '', metadata: dict | None = None) -> None:
+  def log(self, event_type: str, message: str | None = None, metadata: dict | None = None) -> None:
     raise NotImplementedError
 
   def finalize(self, status: str) -> None:
@@ -44,7 +44,7 @@ class JSONLogger(Logger):
   def name(self) -> str:
     return 'json'
 
-  def log(self, event_type: str, message: str = '', metadata: dict | None = None) -> None:
+  def log(self, event_type: str, message: str | None = None, metadata: dict | None = None) -> None:
     self._dir.mkdir(parents=True, exist_ok=True)
     event = create_event(event_type, message, metadata)
     append_event(self._dir, event)

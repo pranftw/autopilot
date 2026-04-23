@@ -4,48 +4,24 @@ ExposeRecord and ExposeCollector live here in cli/ (not core/).
 Core has no knowledge of CLI-specific types.
 """
 
+from autopilot.core.serialization import DictMixin
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Generator
 import time
 
 
 @dataclass
-class ExposeRecord:
+class ExposeRecord(DictMixin):
   """Single CLI command execution record."""
 
-  description: str = ''
-  command: str = ''
+  command: str
+  description: str | None = None
   exit_code: int = 0
   duration_s: float = 0.0
-  stderr: str = ''
-  timestamp: str = ''
-
-  def __post_init__(self) -> None:
-    if not self.timestamp:
-      self.timestamp = datetime.now(timezone.utc).isoformat()
-
-  def to_dict(self) -> dict[str, Any]:
-    return {
-      'description': self.description,
-      'command': self.command,
-      'exit_code': self.exit_code,
-      'duration_s': self.duration_s,
-      'stderr': self.stderr,
-      'timestamp': self.timestamp,
-    }
-
-  @classmethod
-  def from_dict(cls, data: dict[str, Any]) -> 'ExposeRecord':
-    return cls(
-      description=data.get('description', ''),
-      command=data.get('command', ''),
-      exit_code=data.get('exit_code', 0),
-      duration_s=data.get('duration_s', 0.0),
-      stderr=data.get('stderr', ''),
-      timestamp=data.get('timestamp', ''),
-    )
+  stderr: str | None = None
+  timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 
 class ExposeCollector:
@@ -60,7 +36,7 @@ class ExposeCollector:
     command: str,
     exit_code: int = 0,
     duration_s: float = 0.0,
-    stderr: str = '',
+    stderr: str | None = None,
   ) -> None:
     self._records.append(
       ExposeRecord(
@@ -90,7 +66,7 @@ def inject_expose(result_dict: dict[str, Any], collector: ExposeCollector) -> di
 def expose_command(
   collector: ExposeCollector,
   description: str,
-  command: str = '',
+  command: str | None = None,
 ) -> Generator[dict[str, Any], None, None]:
   """Context manager that times a command and auto-records it."""
   state: dict[str, Any] = {'exit_code': 0, 'stderr': ''}
@@ -108,5 +84,5 @@ def expose_command(
       command=command,
       exit_code=state['exit_code'],
       duration_s=round(duration, 3),
-      stderr=state.get('stderr', ''),
+      stderr=state.get('stderr'),
     )

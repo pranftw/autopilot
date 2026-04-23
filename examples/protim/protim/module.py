@@ -1,17 +1,44 @@
-from autopilot.ai.coding import ClaudeCodeAgent
+from autopilot.ai.agents.claude_code import ClaudeCodeAgent
 from autopilot.ai.optimizer import AgentOptimizer
 from autopilot.ai.parameter import PathParameter
+from autopilot.core.gradient import Gradient
 from autopilot.core.loss import Loss
 from autopilot.core.metric import Metric
-from autopilot.core.models import Datum
+from autopilot.core.types import Datum
 from autopilot.core.module import AutoPilotModule
 from autopilot.core.parameter import Parameter
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 
+@dataclass
+class PromptGradient(Gradient):
+  failures: list[dict[str, str]] = field(default_factory=list)
+
+  def accumulate(self, other: 'PromptGradient') -> 'PromptGradient':
+    return PromptGradient(
+      failures=self.failures + other.failures,
+      metadata={**self.metadata, **other.metadata},
+    )
+
+  def render(self) -> str:
+    if not self.failures:
+      return 'All questions answered correctly. No changes needed.'
+    lines = [f'{len(self.failures)} questions answered incorrectly:\n']
+    for f in self.failures:
+      lines.append(
+        f'- Question: {f["question"]}\n  Expected: {f["expected"]}\n  Got: {f["actual"]}'
+      )
+    lines.append(
+      '\nUpdate the system prompt to help answer these questions correctly. '
+      'Add specific knowledge or instructions that address these failures.'
+    )
+    return '\n'.join(lines)
+
+
 class PromptLoss(Loss):
-  """Accumulates QA failures, backward() builds text gradient for the prompt parameter."""
+  """Accumulates QA failures, backward() builds PromptGradient for the prompt parameter."""
 
   def __init__(self, parameters: list[Parameter] | None = None):
     super().__init__(parameters)
@@ -21,7 +48,7 @@ class PromptLoss(Loss):
     if not data.success:
       self._failures.append(
         {
-          'item_id': data.item_id,
+          'id': data.id,
           'question': data.metadata.get('question', ''),
           'expected': data.metadata.get('expected', ''),
           'actual': data.metadata.get('actual', ''),
@@ -29,19 +56,7 @@ class PromptLoss(Loss):
       )
 
   def backward(self) -> None:
-    if not self._failures:
-      grad = 'All questions answered correctly. No changes needed.'
-    else:
-      lines = [f'{len(self._failures)} questions answered incorrectly:\n']
-      for f in self._failures:
-        lines.append(
-          f'- Question: {f["question"]}\n  Expected: {f["expected"]}\n  Got: {f["actual"]}'
-        )
-      lines.append(
-        '\nUpdate the system prompt to help answer these questions correctly. '
-        'Add specific knowledge or instructions that address these failures.'
-      )
-      grad = '\n'.join(lines)
+    grad = PromptGradient(failures=list(self._failures))
     for param in self._loss_parameters:
       if param.requires_grad:
         param.grad = grad
@@ -51,10 +66,12 @@ class PromptLoss(Loss):
 
 
 class QAAccuracyMetric(Metric):
+  higher_is_better = True
+
   def __init__(self):
     super().__init__()
-    self._correct = 0
-    self._total = 0
+    self.add_state('_correct', 0)
+    self.add_state('_total', 0)
 
   def update(self, datum: Datum) -> None:
     self._total += 1
@@ -68,10 +85,6 @@ class QAAccuracyMetric(Metric):
       'total': float(self._total),
       'correct': float(self._correct),
     }
-
-  def reset(self) -> None:
-    self._correct = 0
-    self._total = 0
 
 
 class PromptModule(AutoPilotModule):
@@ -92,7 +105,6 @@ class PromptModule(AutoPilotModule):
   def forward(self, batch: Datum) -> Datum:
     question = batch.metadata.get('question', '')
     expected = batch.metadata.get('expected', '')
-    item_id = batch.item_id
 
     system_prompt = self._read_prompt()
     full_prompt = (
@@ -100,12 +112,11 @@ class PromptModule(AutoPilotModule):
     )
 
     try:
-      result = self._infer_agent.forward(full_prompt)
+      result = self._infer_agent.run(full_prompt)
       actual = result.output.strip()
     except Exception as exc:
       return Datum(
         success=False,
-        item_id=item_id,
         error_message=str(exc),
         metadata={'question': question, 'expected': expected, 'actual': ''},
       )
@@ -113,7 +124,6 @@ class PromptModule(AutoPilotModule):
     success = expected.lower() in actual.lower()
     return Datum(
       success=success,
-      item_id=item_id,
       metadata={
         'question': question,
         'expected': expected,

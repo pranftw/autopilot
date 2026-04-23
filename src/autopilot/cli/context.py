@@ -19,13 +19,11 @@ class CLIContext:
 
   workspace: Path = field(default_factory=Path.cwd)
   project: str | None = None
-  config_path: str = ''
-  environment: str = ''
-  experiment: str = ''
-  dataset: str = ''
-  split: str = ''
+  experiment: str | None = None
+  dataset: str | None = None
+  split: str | None = None
   epoch: int = 0
-  hyperparams_file: str = ''
+  hyperparams_file: str | None = None
   dry_run: bool = False
   verbose: bool = False
   output: Output = field(default_factory=Output)
@@ -60,7 +58,7 @@ class CLIContext:
     return paths.experiment(self.workspace, target, self.project)
 
 
-def _resolve_project(workspace: Path, explicit: str) -> str | None:
+def _resolve_project(workspace: Path, explicit: str | None) -> str | None:
   """Priority: explicit flag > CWD under projects dir."""
   if explicit:
     return explicit
@@ -84,8 +82,6 @@ def build_context(args: argparse.Namespace) -> CLIContext:
   return CLIContext(
     workspace=workspace,
     project=project,
-    config_path=args.config,
-    environment=args.env,
     experiment=args.experiment,
     dataset=args.dataset,
     split=args.split,

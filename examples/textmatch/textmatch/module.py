@@ -1,10 +1,11 @@
 from autopilot.ai.parameter import PathParameter
+from autopilot.core.gradient import Gradient
 from autopilot.core.loss import Loss
 from autopilot.core.metric import Metric
-from autopilot.core.models import Datum
+from autopilot.core.types import Datum
 from autopilot.core.module import AutoPilotModule
 from autopilot.core.parameter import Parameter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from textmatch.optimizer import RuleOptimizer
 from typing import Any
@@ -13,11 +14,39 @@ import re
 
 
 @dataclass
-class RuleGradient:
-  missing_patterns: list[dict]
-  wrong_category: list[dict]
-  ambiguous: list[dict]
-  summary: dict
+class RuleGradient(Gradient):
+  missing_patterns: list[dict] = field(default_factory=list)
+  wrong_category: list[dict] = field(default_factory=list)
+  ambiguous: list[dict] = field(default_factory=list)
+
+  def accumulate(self, other: 'RuleGradient') -> 'RuleGradient':
+    combined_metadata = {**self.metadata, **other.metadata}
+    combined_metadata['total_errors'] = self.metadata.get('total_errors', 0) + other.metadata.get(
+      'total_errors', 0
+    )
+    return RuleGradient(
+      missing_patterns=self.missing_patterns + other.missing_patterns,
+      wrong_category=self.wrong_category + other.wrong_category,
+      ambiguous=self.ambiguous + other.ambiguous,
+      metadata=combined_metadata,
+    )
+
+  def render(self) -> str:
+    parts: list[str] = [f'Total errors: {self.metadata.get("total_errors", 0)}']
+    if self.missing_patterns:
+      parts.append(f'Missing patterns ({len(self.missing_patterns)}):')
+      for m in self.missing_patterns:
+        parts.append(f'  - {m.get("expected_category")}: {m.get("text", "")[:80]}')
+    if self.wrong_category:
+      parts.append(f'Wrong category ({len(self.wrong_category)}):')
+      for w in self.wrong_category:
+        got, exp = w.get('got'), w.get('expected')
+        parts.append(f'  - rule {w.get("rule_index")}: got {got}, expected {exp}')
+    if self.ambiguous:
+      parts.append(f'Ambiguous ({len(self.ambiguous)}):')
+      for a in self.ambiguous:
+        parts.append(f'  - {a.get("id")}: {len(a.get("matched_rules", []))} rules matched')
+    return '\n'.join(parts)
 
 
 class TextMatchLoss(Loss):
@@ -41,7 +70,7 @@ class TextMatchLoss(Loss):
           {
             'text': meta.get('text', ''),
             'expected_category': meta.get('expected', ''),
-            'item_ids': [err.item_id],
+            'ids': [err.id],
           }
         )
       elif failure_type == 'wrong_category':
@@ -50,13 +79,13 @@ class TextMatchLoss(Loss):
             'rule_index': meta.get('matched_rule_index', -1),
             'got': meta.get('predicted', ''),
             'expected': meta.get('expected', ''),
-            'item_id': err.item_id,
+            'id': err.id,
           }
         )
       elif failure_type == 'ambiguous':
         ambiguous.append(
           {
-            'item_id': err.item_id,
+            'id': err.id,
             'matched_rules': meta.get('matched_rules', []),
           }
         )
@@ -64,7 +93,7 @@ class TextMatchLoss(Loss):
       missing_patterns=missing,
       wrong_category=wrong,
       ambiguous=ambiguous,
-      summary={
+      metadata={
         'total_errors': len(self._errors),
         'by_type': {
           'missing': len(missing),
@@ -82,11 +111,13 @@ class TextMatchLoss(Loss):
 
 
 class AccuracyMetric(Metric):
+  higher_is_better = True
+
   def __init__(self):
     super().__init__()
-    self._correct = 0
-    self._total = 0
-    self._per_category: dict[str, dict[str, int]] = {}
+    self.add_state('_correct', 0)
+    self.add_state('_total', 0)
+    self.add_state('_per_category', dict)
 
   def update(self, datum: Datum) -> None:
     self._total += 1
@@ -107,11 +138,6 @@ class AccuracyMetric(Metric):
       'correct': float(self._correct),
     }
 
-  def reset(self) -> None:
-    self._correct = 0
-    self._total = 0
-    self._per_category = {}
-
 
 class TextMatchModule(AutoPilotModule):
   def __init__(self, rules_dir: str):
@@ -131,8 +157,6 @@ class TextMatchModule(AutoPilotModule):
   def _classify(self, batch: Datum, rules: list[dict]) -> Datum:
     text = batch.metadata.get('text', '')
     expected = batch.metadata.get('expected', '')
-    item_id = batch.item_id
-
     matched = []
     for i, rule in enumerate(rules):
       if re.search(rule['pattern'], text, re.IGNORECASE):
@@ -141,7 +165,6 @@ class TextMatchModule(AutoPilotModule):
     if not matched:
       return Datum(
         success=False,
-        item_id=item_id,
         metadata={
           'text': text,
           'predicted': '',
@@ -159,7 +182,6 @@ class TextMatchModule(AutoPilotModule):
     if predicted == expected:
       return Datum(
         success=True,
-        item_id=item_id,
         metadata={
           'text': text,
           'predicted': predicted,
@@ -169,7 +191,6 @@ class TextMatchModule(AutoPilotModule):
 
     return Datum(
       success=False,
-      item_id=item_id,
       metadata={
         'text': text,
         'predicted': predicted,

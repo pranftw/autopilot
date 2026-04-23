@@ -1,3 +1,4 @@
+from autopilot.core.types import Datum
 from autopilot.data.dataloader import DataLoader
 from autopilot.data.datamodule import DataModule
 import pytest
@@ -15,13 +16,14 @@ class _LifecycleModule(DataModule):
 
   def train_dataloader(self) -> DataLoader:
     self.events.append('train_dataloader')
-    return DataLoader([1, 2], batch_size=1, shuffle=False)
+    data = [Datum(metadata={'v': 1}), Datum(metadata={'v': 2})]
+    return DataLoader(data, batch_size=1, shuffle=False)
 
   def val_dataloader(self) -> DataLoader:
-    return DataLoader([3], batch_size=1, shuffle=False)
+    return DataLoader([Datum(metadata={'v': 3})], batch_size=1, shuffle=False)
 
   def test_dataloader(self) -> DataLoader:
-    return DataLoader([4], batch_size=1, shuffle=False)
+    return DataLoader([Datum(metadata={'v': 4})], batch_size=1, shuffle=False)
 
   def teardown(self, stage: str) -> None:
     self.events.append(f'teardown:{stage}')

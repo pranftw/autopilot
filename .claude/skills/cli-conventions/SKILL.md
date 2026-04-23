@@ -1,92 +1,142 @@
 ---
 name: cli-conventions
-description: CLI command patterns for the autopilot CLI using Command, CLI, and argparse. Use when adding commands, subcommands, or modifying global flags.
+description: CLI command patterns, global flags, project bootstrap, and workspace layout for the autopilot CLI. Use when adding commands, subcommands, modifying global flags, creating new workspaces, diagnosing workspace issues, or understanding the project overlay structure.
 ---
 
-## Architecture
+## Entry point
 
-- **`Command`** (`cli/command.py`): recursive node. Assign child `Command` instances as attributes — `__setattr__` registers them. Leaf commands override **`forward(ctx, args)`**. Container commands nest children and/or use **`@subcommand`** / **`@argument`** on methods for inline handlers.
-- **`CLI`** (`cli/command.py`): top-level orchestrator. Subclass **`AutoPilotCLI`** for a full stock CLI, or **`CLI`** for a minimal tree. **`__init__`** wires `self.module`, `self.generator`, `self.judge`, and attaches **`Command`** instances. **`__call__`** → **`run()`**: pre-parse `--project` / `--workspace`, optional project **`cli.py`** via `runpy`, then dispatch.
-- **Project binding**: `class MyCLI(AutoPilotCLI, project='my-name'):` registers the class in **`CLI._project_registry`** via **`__init_subclass__`**. Entry: **`MyCLI()()`**.
-- **Registration**: **`Command.register(subparsers)`** walks children and attaches parsers; **`make_subparser()`** (`cli/shared.py`) adds global flags. No `register(subparsers)` free functions in command modules.
+`autopilot.cli.main:main`, program name `autopilot`. Implementation uses `Command` subclasses (`forward()`, nested commands, `@subcommand`) composed on `AutoPilotCLI`; `main()` calls `AutoPilotCLI()()`.
 
-## Adding a command
+## Top-level commands
 
-1. Create `src/autopilot/cli/commands/<name>.py`.
-2. Subclass **`Command`**, set **`name`** / **`help`** if the auto-derived name is wrong.
-3. Either override **`forward()`** (leaf) or in **`__init__`** assign child commands / define **`@subcommand`** methods.
-4. Instantiate the command on **`AutoPilotCLI.__init__`** (or on a project **`CLI`** subclass).
+| Command | Summary |
+| --- | --- |
+| `workspace` | `init`, `doctor`, `tree` |
+| `project` | Create, list, and check project health |
+| `dataset` | List, show, seed, split |
+| `experiment` | Experiment lifecycle |
+| `optimize` | Optimization driver |
+| `debug` | Debug workflows |
+| `policy` | Policy and scoring inspection |
+| `ai` | AI eval generation and judging (`ai generate`, `ai judge` with run/resume/summarize/distribution) |
+| `report` | Reporting |
+| `promote` | Promotion workflow |
+| `store` | Content-addressed code versioning |
+| `status` | Experiment overview (epoch, metrics, stop reason) |
+| `diagnose` | Trace diagnostics and node heatmaps |
+| `trace` | Collect and inspect computation traces |
+| `propose` | Create, verify, revert, and list proposals |
+| `memory` | Query, record, trends, and context |
+| `agent` | Agent operations (run, list, session) |
 
-Minimal leaf example:
-
-```python
-from autopilot.cli.command import Command
-from autopilot.cli.context import CLIContext
-import argparse
-
-
-class WidgetCommand(Command):
-  name = 'widget'
-  help = 'Do something useful'
-
-  def forward(self, ctx: CLIContext, args: argparse.Namespace) -> None:
-    ctx.output.result({'ok': True})
-```
-
-Declarative flags use **`Argument`** / **`Flag`** class attributes; **`collect_arguments()`** adds them in **`register()`**.
-
-## CLIContext
-
-`src/autopilot/cli/context.py`. Resolved state for handlers:
-
-- `workspace`, `project`, paths via **`paths.*`**
-- `generator`, `judge`, `module` — set from the active **`CLI`** instance in **`CLI._run_direct()`**
-- `trainer` — constructed when **`module`** is set
-- `dry_run`, `verbose`, **`output`**
-
-## Output
-
-All user-facing text through **`ctx.output`**: **`info`**, **`warn`**, **`error`**, **`success`**, **`result`**, **`table`**, **`data`**.
+Omitting a subcommand where required exits with help or error per `argparse` rules. Running `autopilot` with no command prints top-level help and exits 0.
 
 ## Global flags
 
-`src/autopilot/cli/shared.py`: **`add_global_flags()`** on the root parser; **`make_subparser()`** repeats them on subparsers used by **`Command.register()`**.
+Leaf parsers and inline `@subcommand` parsers pick up shared flags via `make_subparser()` (invoked from `Command.register()` in `cli/command.py`), which calls `add_global_flags()` in `cli/resolvers.py`:
 
-## Entry points
+| Flag | Meaning |
+| --- | --- |
+| `-p`, `--project NAME` | Project name (auto-detected when cwd is under `autopilot/projects/<name>`) |
+| `--workspace PATH` | Workspace root (default: current directory) |
+| `--experiment SLUG` | Active experiment |
+| `--dataset NAME` | Dataset name |
+| `--split NAME` | Dataset split: `train`, `val`, `test` |
+| `--epoch N` | Epoch number |
+| `--hyperparams PATH` | Hyperparameters JSON file |
+| `--dry-run` | Show what would happen without executing |
+| `--verbose` | More logging; on errors, print traceback |
+| `--no-color` | Disable ANSI color |
+| `--json` | Machine-readable output (see below) |
+| `--expose` | Enable JSON audit trail via `ExposeCollector` |
 
-- **Library / console script**: **`AutoPilotCLI()()`** or **`main()`** in **`cli/main.py`**.
-- **Project overlay**: subclass **`AutoPilotCLI`** (or **`CLI`**) with **`project='...'`**, wire **`module` / `generator` / `judge`** in **`__init__`**, end **`cli.py`** with **`MyCLI()()`**.
+## `--json` behavior
 
-## Key files
+When `--json` is set, `Output` buffers structured messages. `info`, `success`, `warn`, and `error` append objects with `level` and `message`. `data` and `table` append typed records. `result` prints a final JSON object on stdout; shape is equivalent to:
 
-- `src/autopilot/cli/command.py` — **`Command`**, **`CLI`**, **`Argument`**, **`Flag`**, **`@subcommand`**, **`@argument`**
-- `src/autopilot/cli/main.py` — **`AutoPilotCLI`**, **`main()`**
-- `src/autopilot/cli/shared.py` — **`make_subparser()`**, **`add_global_flags()`**
-- `src/autopilot/cli/context.py` — **`CLIContext`**, **`build_context()`**
-- `src/autopilot/cli/output.py` — **`Output`**
-
-## Notable command output shapes
-
-**`status`** returns:
-```json
+```python
 {
-  "slug": "...", "epoch": N, "trained_epochs": N, "decision": "...",
-  "stop_reason": "plateau|crash|null", "last_good_epoch": N,
-  "last_metrics": {...}, "best_baseline": {...},
-  "regression": {"epoch": N, "verdict": "...", "regressed_metrics": [...]},
-  "memory": {"total_records": N, "blocked_strategies": [...]}
+  'ok': True,
+  'result': {'key': 'value'},
+  'messages': [{'level': 'info', 'message': '...'}],
 }
 ```
 
-**`propose verify`** uses `--check-epoch` (not `--epoch` to avoid global flag conflict). Returns `{verdict, items_tested, ...}`. `propose revert` uses `--restore-epoch`.
+Parse stdout as JSON for scripting; stderr still carries errors in human form unless commands only use `Output`. Use `flush_json` only where a command explicitly ends with buffered rows and no `result` envelope.
 
-**`trace inspect --node <id>`** returns `{matches: [{batch_idx, item_id, success, feedback, error_message}], count}`. With `--depth > 1`, includes `memory_records`.
+## Standard workspace layout
 
-**`project init`** generates `cli.py`, `module.py`, `data.py` skeleton files. Use `--bare` to skip.
+```
+workspace/
+  autopilot/
+    pyproject.toml
+    plugins/
+    projects/
+      <name>/
+        cli.py                # defines CLI subclass; entry MyCLI()()
+        trainer.py            # builds Trainer with project Module
+        ai/
+        experiments/
+          <slug>/
+            manifest.json
+            events.jsonl
+            commands.json
+        records/
+          promotions/
+          notes/
+        datasets/
+```
+
+No **`workspace.toml`**, **`project.toml`**, or workflow TOML files -- project wiring lives in Python (`cli.py`, `trainer.py`).
+
+## Project CLI registration
+
+Subclass **`AutoPilotCLI`** (or **`CLI`**) with **`project='<name>'`** on the class statement. **`CLI.__init_subclass__`** stores **`project -> CLI class`** in **`CLI._project_registry`**. When **`autopilot -p <name>`** runs, **`CLI.run()`** may execute **`projects/<name>/cli.py`** via `runpy`, then instantiates the registered class if present.
+
+## Workspace commands
+
+`src/autopilot/cli/commands/workspace.py`:
+
+- **`autopilot workspace init`** -- creates the **`autopilot/`** tree (projects, experiments, datasets, records, plugins, etc.); idempotent.
+- **`autopilot workspace doctor`** -- validates expected directories under **`autopilot/`**.
+- **`autopilot workspace tree`** -- ASCII tree of **`autopilot/`** (bounded depth).
+
+## Project commands
+
+`src/autopilot/cli/commands/project.py`:
+
+- **`autopilot project list`** -- lists project directories under **`autopilot/projects/`**.
+- **`autopilot project init <name>`** -- scaffolds a project directory with `cli.py`, `module.py`, and `data.py` from templates (use `--bare` to skip template files).
+- **`autopilot project doctor <name>`** -- health checks for a project (e.g. **`cli.py`**, data dirs).
+
+## Project resolution
+
+Order: **`--project` / `-p`** > current working directory under **`autopilot/projects/<name>/`**. Optional registered **`CLI`** subclass for that **`project`** name handles dispatch after **`cli.py`** import side effects.
+
+## CLIContext
+
+`src/autopilot/cli/context.py` -- paths via **`paths.*`**. **`generator`**, **`judge`**, **`module`** come from the active **`CLI`** instance when **`CLI._run_direct()`** builds context.
+
+## Centralized paths
+
+`src/autopilot/core/paths.py` -- single definitions for **`autopilot_dir`**, **`projects_dir`**, **`root(workspace, project)`**, experiments, datasets, records, **`project_cli`**, etc.
+
+## Key files
+
+- `src/autopilot/cli/commands/workspace.py`
+- `src/autopilot/cli/commands/project.py`
+- `src/autopilot/core/paths.py`
+- `src/autopilot/core/config.py`
+- `src/autopilot/cli/context.py`
+- `src/autopilot/cli/command.py` -- **`CLI`**, project registry
+- `src/autopilot/cli/main.py` -- **`AutoPilotCLI`**, **`main()`**
+- `src/autopilot/cli/resolvers.py` -- **`make_subparser`**, **`add_global_flags`**
+- `src/autopilot/cli/output.py` -- **`Output`** with `result()`, `info()`, `table()`
+- `src/autopilot/cli/expose.py` -- **`ExposeRecord`**, **`ExposeCollector`**
 
 ## Gotchas
 
-- Handlers orchestrate only; delegate to **`core.services`** and adapters.
-- Prefer **`uv run autopilot <command>`** over one-off scripts that skip manifests/events.
-- Exceptions in **`forward()`** / subcommand handlers are caught in **`CLI.dispatch()`**, surfaced via **`ctx.output`**, exit **1**.
-- Avoid `--epoch` as a subcommand-level argument name -- it conflicts with the global `--epoch` flag. Use names like `--check-epoch` or `--restore-epoch`.
+- Overlays live under **`autopilot/projects/<name>/`**, not in **`src/autopilot/`**.
+- **`project init`** creates **`cli.py`**, **`module.py`**, **`data.py`** from templates; it does **not** create **`trainer.py`**. Use **`--bare`** to skip template files.
+- Paths resolve with **`Path.resolve()`**; **`--workspace`** defaults to **`.`**.
+- Runtime and infrastructure settings belong in Python (constructors, **`Trainer`**, **`Module`**) and explicit CLI flags. Do not assume TOML workspace or workflow layers.

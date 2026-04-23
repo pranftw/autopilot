@@ -6,7 +6,8 @@ from autopilot.cli.commands.ai import (
   JudgeRun,
   _load_generator_config,
   _load_judge_items,
-  _require,
+  _require_generator,
+  _require_judge,
 )
 from autopilot.cli.context import CLIContext
 from autopilot.cli.output import Output
@@ -70,16 +71,16 @@ class TestRequire:
   def test_raises_without_generator(self) -> None:
     ctx = _ctx(Path('/ws'))
     with pytest.raises(ValueError, match='no generator configured'):
-      _require(ctx, 'generator')
+      _require_generator(ctx)
 
   def test_raises_without_judge(self) -> None:
     ctx = _ctx(Path('/ws'))
     with pytest.raises(ValueError, match='no judge configured'):
-      _require(ctx, 'judge')
+      _require_judge(ctx)
 
   def test_passes_when_present(self) -> None:
     ctx = _ctx(Path('/ws'), generator=object())
-    _require(ctx, 'generator')
+    _require_generator(ctx)
 
 
 class TestLoadGeneratorConfig:

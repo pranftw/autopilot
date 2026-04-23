@@ -1,15 +1,19 @@
-from autopilot.core.metric import CompositeMetric, Metric
-from autopilot.core.models import Datum
+"""Tests for torchmetrics-style metric base classes."""
+
+from autopilot.core.metric import Metric, MetricCollection
 from autopilot.core.module import Module
 from autopilot.core.parameter import Parameter
+from autopilot.core.types import Datum
 import pytest
 
 
 class _SumMetric(Metric):
+  higher_is_better = True
+
   def __init__(self):
     super().__init__()
-    self._total = 0.0
-    self._count = 0
+    self.add_state('_total', 0.0)
+    self.add_state('_count', 0)
 
   def update(self, datum):
     for v in datum.metrics.values():
@@ -20,15 +24,13 @@ class _SumMetric(Metric):
     avg = self._total / self._count if self._count else 0.0
     return {'avg': avg}
 
-  def reset(self):
-    self._total = 0.0
-    self._count = 0
-
 
 class _CountMetric(Metric):
+  higher_is_better = True
+
   def __init__(self):
     super().__init__()
-    self._n = 0
+    self.add_state('_n', 0)
 
   def update(self, datum):
     self._n += 1
@@ -36,8 +38,22 @@ class _CountMetric(Metric):
   def compute(self):
     return {'count': float(self._n)}
 
-  def reset(self):
-    self._n = 0
+
+class _ErrorRateMetric(Metric):
+  higher_is_better = False
+
+  def __init__(self):
+    super().__init__()
+    self.add_state('_errors', 0)
+    self.add_state('_total', 0)
+
+  def update(self, datum):
+    self._total += 1
+    if not datum.success:
+      self._errors += 1
+
+  def compute(self):
+    return {'error_rate': self._errors / self._total if self._total else 0.0}
 
 
 class _LeafModule(Module):
@@ -56,9 +72,6 @@ class _MetricWithParam(Metric):
   def compute(self):
     return {}
 
-  def reset(self):
-    pass
-
 
 class _StubMetric(Metric):
   def update(self, datum):
@@ -66,9 +79,6 @@ class _StubMetric(Metric):
 
   def compute(self):
     return {}
-
-  def reset(self):
-    pass
 
 
 class TestMetricIsModule:
@@ -94,12 +104,6 @@ class TestMetricBase:
     with pytest.raises(NotImplementedError):
       Metric().compute()
 
-  def test_reset_clears_state(self) -> None:
-    m = Metric()
-    m._state['x'] = 1
-    m.reset()
-    assert m._state == {}
-
   def test_name_returns_class_name(self) -> None:
     assert Metric().name() == 'Metric'
 
@@ -109,18 +113,176 @@ class TestMetricBase:
   def test_repr(self) -> None:
     assert repr(Metric()) == 'Metric()'
 
+  def test_higher_is_better_default_none(self) -> None:
+    assert Metric.higher_is_better is None
+    assert Metric().higher_is_better is None
 
-class TestMetricForward:
-  def test_forward_calls_update_and_returns_compute(self) -> None:
+  def test_no_forward_on_metric(self) -> None:
     m = _SumMetric()
-    d = Datum(metrics={'x': 10.0})
-    assert m.forward(d) == {'avg': 10.0}
+    with pytest.raises(NotImplementedError):
+      m.forward(Datum())
 
-  def test_forward_accumulates(self) -> None:
+
+class TestAddState:
+  def test_add_state_value_default(self) -> None:
     m = _SumMetric()
-    m.forward(Datum(metrics={'x': 10.0}))
-    out = m.forward(Datum(metrics={'y': 20.0}))
-    assert out == {'avg': 15.0}
+    assert m._total == 0.0
+    assert m._count == 0
+
+  def test_add_state_factory_default(self) -> None:
+    class ListMetric(Metric):
+      def __init__(self):
+        super().__init__()
+        self.add_state('items', list)
+
+      def update(self, datum):
+        self.items.append(datum)
+
+      def compute(self):
+        return {'n': float(len(self.items))}
+
+    m = ListMetric()
+    assert m.items == []
+    assert isinstance(m.items, list)
+
+  def test_add_state_dict_factory(self) -> None:
+    class DictMetric(Metric):
+      def __init__(self):
+        super().__init__()
+        self.add_state('acc', dict)
+
+      def update(self, datum):
+        pass
+
+      def compute(self):
+        return {}
+
+    m = DictMetric()
+    assert m.acc == {}
+    assert isinstance(m.acc, dict)
+
+  def test_reset_restores_value(self) -> None:
+    m = _SumMetric()
+    m.update(Datum(metrics={'x': 10.0}))
+    assert m._total == 10.0
+    m.reset()
+    assert m._total == 0.0
+    assert m._count == 0
+
+  def test_reset_restores_factory(self) -> None:
+    class ListMetric(Metric):
+      def __init__(self):
+        super().__init__()
+        self.add_state('items', list)
+
+      def update(self, datum):
+        self.items.append(1)
+
+      def compute(self):
+        return {}
+
+    m = ListMetric()
+    m.update(Datum())
+    assert len(m.items) == 1
+    m.reset()
+    assert m.items == []
+
+  def test_reset_multiple_states(self) -> None:
+    m = _SumMetric()
+    m.update(Datum(metrics={'x': 5.0}))
+    m.reset()
+    assert m._total == 0.0
+    assert m._count == 0
+
+  def test_reset_resets_update_count(self) -> None:
+    m = _SumMetric()
+    m.update(Datum(metrics={'x': 1.0}))
+    assert m.update_count == 1
+    m.reset()
+    assert m.update_count == 0
+
+  def test_add_state_accessible_as_attribute(self) -> None:
+    m = _SumMetric()
+    assert hasattr(m, '_total')
+    assert hasattr(m, '_count')
+
+  def test_add_state_in_defaults_dict(self) -> None:
+    m = _SumMetric()
+    assert '_total' in m._defaults
+    assert '_count' in m._defaults
+
+  def test_no_manual_reset_needed(self) -> None:
+    m = _SumMetric()
+    m.update(Datum(metrics={'x': 10.0}))
+    m.reset()
+    assert m.compute() == {'avg': 0.0}
+
+
+class TestUpdateWrapping:
+  def test_update_count_incremented(self) -> None:
+    m = _SumMetric()
+    m.update(Datum(metrics={'x': 1.0}))
+    m.update(Datum(metrics={'x': 2.0}))
+    assert m.update_count == 2
+
+  def test_update_count_property(self) -> None:
+    m = _CountMetric()
+    assert m.update_count == 0
+    m.update(Datum())
+    assert m.update_count == 1
+
+  def test_update_count_reset_by_reset(self) -> None:
+    m = _SumMetric()
+    m.update(Datum(metrics={'x': 1.0}))
+    m.reset()
+    assert m.update_count == 0
+
+  def test_wrapped_update_preserves_behavior(self) -> None:
+    m = _SumMetric()
+    m.update(Datum(metrics={'x': 10.0}))
+    m.update(Datum(metrics={'y': 20.0}))
+    assert m.compute() == {'avg': 15.0}
+
+
+class TestHigherIsBetter:
+  def test_default_none(self) -> None:
+    assert Metric.higher_is_better is None
+
+  def test_subclass_true(self) -> None:
+    assert _SumMetric.higher_is_better is True
+    assert _SumMetric().higher_is_better is True
+
+  def test_subclass_false(self) -> None:
+    assert _ErrorRateMetric.higher_is_better is False
+    assert _ErrorRateMetric().higher_is_better is False
+
+  def test_inheritable(self) -> None:
+    class SubSum(_SumMetric):
+      pass
+
+    assert SubSum.higher_is_better is True
+
+
+class TestMetricClone:
+  def test_clone_fresh_state(self) -> None:
+    m = _SumMetric()
+    m.update(Datum(metrics={'x': 5.0}))
+    c = m.clone()
+    assert c._total == 5.0
+    c.reset()
+    assert c._total == 0.0
+    assert m._total == 5.0
+
+  def test_clone_same_config(self) -> None:
+    m = _SumMetric()
+    c = m.clone()
+    assert type(c) is type(m)
+
+  def test_clone_independent(self) -> None:
+    m = _SumMetric()
+    c = m.clone()
+    c.update(Datum(metrics={'x': 100.0}))
+    assert m._total == 0.0
 
 
 class TestMetricUpdateComputeReset:
@@ -214,22 +376,22 @@ class TestMetricOnModule:
     assert mod.p is mod._parameters['p']
 
 
-class TestCompositeMetric:
+class TestMetricCollection:
   def test_compose_via_add(self) -> None:
     c = _SumMetric() + _CountMetric()
-    assert isinstance(c, CompositeMetric)
+    assert isinstance(c, MetricCollection)
 
-  def test_parts_not_metrics(self) -> None:
-    c = _SumMetric() + _CountMetric()
-    assert hasattr(c, '_parts')
-    assert isinstance(c._parts, list)
-    assert not hasattr(c, '_metrics')
+  def test_from_list(self) -> None:
+    c = MetricCollection([_SumMetric(), _CountMetric()])
+    assert isinstance(c, MetricCollection)
 
-  def test_children_registered(self) -> None:
-    c = _SumMetric() + _CountMetric()
-    named = dict(c.named_modules())
-    assert 'metric_0' in named
-    assert 'metric_1' in named
+  def test_from_dict(self) -> None:
+    c = MetricCollection({'a': _SumMetric(), 'b': _CountMetric()})
+    assert isinstance(c, MetricCollection)
+
+  def test_duplicate_names_raise(self) -> None:
+    with pytest.raises(ValueError, match='duplicate'):
+      MetricCollection([_SumMetric(), _SumMetric()])
 
   def test_update_delegates(self) -> None:
     c = _SumMetric() + _CountMetric()
@@ -242,28 +404,75 @@ class TestCompositeMetric:
     c.update(Datum(metrics={'x': 4.0}))
     assert c.compute() == {'avg': 3.0, 'count': 2.0}
 
+  def test_key_collision_raises(self) -> None:
+    class SameKeyMetric(Metric):
+      def __init__(self):
+        super().__init__()
+
+      def update(self, datum):
+        pass
+
+      def compute(self):
+        return {'avg': 1.0}
+
+    c = MetricCollection([_SumMetric(), SameKeyMetric()])
+    c.update(Datum(metrics={'x': 1.0}))
+    with pytest.raises(ValueError, match='collision'):
+      c.compute()
+
+  def test_prefix(self) -> None:
+    c = MetricCollection([_SumMetric()], prefix='val_')
+    c.update(Datum(metrics={'x': 5.0}))
+    assert 'val_avg' in c.compute()
+
+  def test_postfix(self) -> None:
+    c = MetricCollection([_SumMetric()], postfix='_mean')
+    c.update(Datum(metrics={'x': 5.0}))
+    assert 'avg_mean' in c.compute()
+
+  def test_prefix_and_postfix(self) -> None:
+    c = MetricCollection([_SumMetric()], prefix='val_', postfix='_mean')
+    c.update(Datum(metrics={'x': 5.0}))
+    assert 'val_avg_mean' in c.compute()
+
   def test_reset_all(self) -> None:
     c = _SumMetric() + _CountMetric()
     c.update(Datum(metrics={'x': 1.0}))
     c.reset()
     assert c.compute() == {'avg': 0.0, 'count': 0.0}
 
-  def test_forward_works(self) -> None:
-    c = _SumMetric() + _CountMetric()
-    out = c.forward(Datum(metrics={'x': 10.0}))
-    assert out == {'avg': 10.0, 'count': 1.0}
+  def test_children_registered_as_modules(self) -> None:
+    c = MetricCollection({'a': _SumMetric(), 'b': _CountMetric()})
+    named = dict(c.named_modules())
+    assert 'a' in named
+    assert 'b' in named
 
-  def test_chain_three(self) -> None:
-    a = _SumMetric()
-    b = _CountMetric()
-    c = _SumMetric()
-    comp = a + b + c
-    assert len(comp._parts) == 2
-    assert isinstance(comp._parts[0], CompositeMetric)
+  def test_clone(self) -> None:
+    c = MetricCollection([_SumMetric(), _CountMetric()])
+    c.update(Datum(metrics={'x': 1.0}))
+    c2 = c.clone()
+    c2.reset()
+    assert c.compute()['count'] == 1.0
+    assert c2.compute()['count'] == 0.0
 
   def test_repr(self) -> None:
-    c = _SumMetric() + _CountMetric()
-    assert repr(c) == 'CompositeMetric([_SumMetric, _CountMetric])'
+    c = MetricCollection({'a': _SumMetric(), 'b': _CountMetric()})
+    r = repr(c)
+    assert 'MetricCollection' in r
+    assert 'a' in r
+    assert 'b' in r
+
+  def test_higher_is_better_none_for_collection(self) -> None:
+    c = MetricCollection([_SumMetric(), _CountMetric()])
+    assert c.higher_is_better is None
+
+  def test_nested_collection(self) -> None:
+    inner = MetricCollection([_SumMetric()], prefix='inner_')
+    outer = MetricCollection({'group': inner, 'count': _CountMetric()})
+    outer.update(Datum(metrics={'x': 5.0}))
+    result = outer.compute()
+    assert 'inner_avg' in result
+    assert 'count' in result
 
 
 class TestMetricCompetingStore:

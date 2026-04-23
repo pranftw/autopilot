@@ -1,13 +1,14 @@
 """Callback hooks with gradient accumulation."""
 
-from autopilot.core.callbacks import Callback
+from autopilot.core.callbacks.callback import Callback
 from autopilot.core.loss import Loss
-from autopilot.core.models import Datum
 from autopilot.core.module import AutoPilotModule
 from autopilot.core.optimizer import Optimizer
 from autopilot.core.parameter import Parameter
 from autopilot.core.trainer import Trainer
+from autopilot.core.types import Datum
 from autopilot.data.dataloader import DataLoader
+from helpers import NumericGradient
 
 
 class _TLoss(Loss):
@@ -20,7 +21,7 @@ class _TLoss(Loss):
   def backward(self):
     for p in self._loss_parameters:
       if p.requires_grad:
-        p.grad = 'g'
+        p.grad = NumericGradient(value=1.0)
 
   def reset(self):
     pass

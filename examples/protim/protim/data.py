@@ -1,4 +1,4 @@
-from autopilot.core.models import Datum
+from autopilot.core.types import Datum
 from autopilot.data.dataloader import DataLoader
 from autopilot.data.datamodule import DataModule
 from autopilot.data.dataset import Dataset
@@ -17,11 +17,12 @@ class QADataset(Dataset):
 
   def __getitem__(self, index: int) -> Datum:
     item = self._items[index]
+    label = item.get('metadata', {}).get('label', '')
     return Datum(
-      item_id=item['item_id'],
       metadata={
         'question': item['question'],
         'expected': item['expected'],
+        'label': label,
       },
     )
 

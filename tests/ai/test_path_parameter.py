@@ -17,7 +17,7 @@ class TestPathParameterBase:
     assert p.pattern == '**/*'
 
   def test_path_parameter_is_parameter_subclass(self) -> None:
-    p = PathParameter()
+    p = PathParameter(source='/tmp')
     assert isinstance(p, Parameter)
 
   def test_path_parameter_to_dict(self) -> None:
@@ -60,3 +60,52 @@ class TestPathParameterModuleIntegration:
   def test_path_parameter_missing_source(self) -> None:
     p = PathParameter(source='/nonexistent/path')
     assert p.matched_files() == []
+
+
+class TestPathParameterRender:
+  def test_path_parameter_render(self, tmp_path: Path) -> None:
+    src = tmp_path / 'src'
+    src.mkdir()
+    (src / 'a.py').write_text('pass')
+    (src / 'b.py').write_text('pass')
+    p = PathParameter(source=str(src), pattern='*.py')
+    output = p.render()
+    assert f'Editable files ({src})' in output
+    assert 'a.py' in output
+    assert 'b.py' in output
+
+  def test_path_parameter_render_empty(self) -> None:
+    p = PathParameter(source='/nonexistent/path')
+    assert p.render() == ''
+
+
+class TestPathParameterSnapshot:
+  def test_path_parameter_snapshot(self, tmp_path: Path) -> None:
+    src = tmp_path / 'src'
+    src.mkdir()
+    (src / 'a.txt').write_text('hello')
+    (src / 'b.txt').write_text('world')
+    p = PathParameter(source=str(src), pattern='*.txt')
+    snap = p.snapshot()
+    assert snap == {'a.txt': 'hello', 'b.txt': 'world'}
+
+  def test_path_parameter_snapshot_empty(self) -> None:
+    p = PathParameter(source='/nonexistent/path')
+    assert p.snapshot() == {}
+
+  def test_path_parameter_restore(self, tmp_path: Path) -> None:
+    src = tmp_path / 'src'
+    src.mkdir()
+    (src / 'a.txt').write_text('original')
+    p = PathParameter(source=str(src), pattern='*.txt')
+    snap = p.snapshot()
+    (src / 'a.txt').write_text('modified')
+    p.restore(snap)
+    assert (src / 'a.txt').read_text() == 'original'
+
+  def test_path_parameter_restore_creates_dirs(self, tmp_path: Path) -> None:
+    src = tmp_path / 'src'
+    src.mkdir()
+    p = PathParameter(source=str(src))
+    p.restore({'nested/deep/file.txt': 'content'})
+    assert (src / 'nested' / 'deep' / 'file.txt').read_text() == 'content'
