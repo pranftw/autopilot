@@ -5,12 +5,12 @@ import json
 
 
 class RuleOptimizer(Optimizer):
-  def __init__(self, parameters: list[Parameter], rules_dir: str, lr: float = 1.0):
-    super().__init__(parameters, lr)
+  def __init__(self, params: list[Parameter], rules_dir: str, lr: float = 1.0):
+    super().__init__(params, lr=lr)
     self._rules_dir = rules_dir
 
   def step(self) -> None:
-    for param in self._parameters:
+    for param in self.parameters:
       if not param.requires_grad or param.grad is None:
         continue
       grad = param.grad

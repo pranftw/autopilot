@@ -3,27 +3,43 @@
 from autopilot.ai.agents.agent import StepAgent
 from autopilot.ai.data import StratifiedSplitter
 from autopilot.ai.evaluation.checkpoints import CheckpointManager
+from autopilot.ai.evaluation.pipeline import (
+  EvalRunContext,
+  hash_eval_config,
+  log_item_failure,
+  resume_from_checkpoint,
+  run_parallel_items,
+  write_checkpoint_header,
+)
+from autopilot.ai.evaluation.protocols import EvaluationOutputProtocol
 from autopilot.ai.evaluation.schemas import IT, C, DataItem, GeneratorConfig
 from autopilot.ai.evaluation.steps import Step, collect_steps, run_step_workflow
-from autopilot.ai.runtime import ParallelRunner, SlidingWindowLimiter
-from autopilot.cli.output import Output
+from autopilot.ai.runtime import SlidingWindowLimiter
+from autopilot.core.errors import AIError
 from autopilot.data.dataset import ListDataset
 from autopilot.tracking.io import atomic_write_json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Generic, Protocol
+from typing import Any, Generic, Protocol, TypeVar
 import asyncio
-import hashlib
 import logging
 
 logger = logging.getLogger(__name__)
 
 
-def stratify_by(*fields: str):
-  """Class decorator: auto-generate stratify_key from field paths."""
+_ClassT = TypeVar('_ClassT', bound=type[Any])
 
-  def decorator(cls):
-    def _stratify_key(self, item):
-      parts = []
+
+def stratify_by(*fields: str) -> Callable[[_ClassT], _ClassT]:
+  """Class decorator: auto-generate stratify_key from field paths.
+
+  Returns:
+    Decorator that adds ``stratify_key`` to the wrapped class.
+  """
+
+  def decorator(cls: _ClassT) -> _ClassT:
+    def _stratify_key(_self: Any, item: Any) -> str:
+      parts: list[str] = []
       for f in fields:
         val = item.custom
         for attr in f.split('.'):
@@ -40,13 +56,21 @@ def stratify_by(*fields: str):
 class GeneratorAgentProtocol(Protocol[C, IT]):
   """Structural typing contract for eval generators."""
 
-  def create_slots(self, config: GeneratorConfig[C]) -> list[dict]: ...
+  def create_slots(self, config: GeneratorConfig[C]) -> list[dict]:
+    """Plan generation slots from configuration."""
+    ...
 
-  def define_steps(self, config: GeneratorConfig[C]) -> list[Step]: ...
+  def define_steps(self, config: GeneratorConfig[C]) -> list[Step]:
+    """Return ordered workflow steps for the given configuration."""
+    ...
 
-  def assemble_item(self, slot: dict, step_results: dict) -> DataItem[IT] | None: ...
+  def assemble_item(self, slot: dict, step_results: dict) -> DataItem[IT] | None:
+    """Build a dataset item from a slot and step outputs; ``None`` means reject."""
+    ...
 
-  def stratify_key(self, item: DataItem[IT]) -> str: ...
+  def stratify_key(self, item: DataItem[IT]) -> str:
+    """Return a key used for stratified splitting of ``item``."""
+    ...
 
 
 class GeneratorAgent(StepAgent, Generic[C, IT]):
@@ -82,80 +106,162 @@ class GeneratorAgent(StepAgent, Generic[C, IT]):
     """Return key for stratified splitting."""
     raise NotImplementedError
 
+  def _slot_result_from_workflow(
+    self,
+    slot: dict,
+    slot_id: str,
+    result: dict,
+    ckpt: CheckpointManager,
+    *,
+    for_resume: bool,
+  ) -> dict:
+    """Assemble item from workflow result and record checkpoint event.
+
+    Returns:
+      Dict with ``id`` and either ``item``, ``skipped: True``, or ``error`` string.
+    """
+    item = self.assemble_item(slot, result)
+    if item is not None:
+      ckpt.save_event('result', slot_id, {'item': item.model_dump()})
+      return {'id': slot_id, 'item': item}
+    reason = 'rejected' if for_resume else 'rejected by assemble_item'
+    ckpt.save_event('skip', slot_id, {'reason': reason})
+    return {'id': slot_id, 'skipped': True}
+
+  async def _process_slot_ckpt(
+    self,
+    ckpt: CheckpointManager,
+    steps: list[Step],
+    config: GeneratorConfig[C],
+    output: EvaluationOutputProtocol,
+    slot: dict,
+    *,
+    for_resume: bool,
+  ) -> dict:
+    """Process a single slot with checkpointing. Shared by async_run and resume.
+
+    Returns:
+      Dict with ``id`` and ``skipped``, ``item``, or ``error`` depending on outcome.
+    """
+    slot_id = slot['id']
+    if not for_resume and ckpt.is_completed(slot_id):
+      return {'id': slot_id, 'skipped': True}
+    try:
+      result = await run_step_workflow(
+        steps=steps,
+        initial_context={'slot': slot},
+        model=config.run.model,
+        run_config=config.run,
+      )
+    except (OSError, ValueError, KeyError, RuntimeError, TypeError) as exc:
+      log_item_failure(f'slot {slot_id}', exc, output)
+      ckpt.save_event('error', slot_id, {'error': str(exc)})
+      return {'id': slot_id, 'error': str(exc)}
+    except AIError as exc:
+      log_item_failure(f'slot {slot_id}', exc, output, unexpected=True)
+      ckpt.save_event('error', slot_id, {'error': str(exc)})
+      return {'id': slot_id, 'error': str(exc)}
+    else:
+      return self._slot_result_from_workflow(slot, slot_id, result, ckpt, for_resume=for_resume)
+
   def run(
     self,
     config: GeneratorConfig[C],
     output_dir: Path,
-    output: Output,
-  ) -> dict:
+    output: EvaluationOutputProtocol,
+  ) -> dict[str, Any]:
+    """Runs the full generation pipeline synchronously.
+
+    Wraps :meth:`async_run` with :func:`asyncio.run`.
+
+    Args:
+      config: Generator configuration (model, counts, splits, custom payload).
+      output_dir: Directory for checkpoint, split JSONL files, and metadata.
+      output: Output sink satisfying :class:`EvaluationOutputProtocol`.
+
+    Returns:
+      Summary dict with checkpoint totals, split sizes, and metadata.
+    """
     return asyncio.run(self.async_run(config, output_dir, output))
 
-  async def async_run(
+  def _generator_run_setup(
     self,
     config: GeneratorConfig[C],
     output_dir: Path,
-    output: Output,
-  ) -> dict:
-    """Full run: plan slots -> run step workflow per slot -> split -> write."""
-    output_dir.mkdir(parents=True, exist_ok=True)
+  ) -> tuple[list[dict], list[Step], CheckpointManager, str]:
+    """Plan slots, collect steps, initialize checkpoint, compute config hash.
+
+    Returns:
+      Tuple of ``(slots, steps, checkpoint_manager, config_hash_hex)``.
+    """
     slots = self.create_slots(config)
     steps = self.define_steps(config)
     step_names = [s.name for s in steps]
 
-    config_hash = hashlib.sha256(config.model_dump_json().encode()).hexdigest()[:16]
+    run_ctx = EvalRunContext(
+      output_dir,
+      hash_eval_config(config.model_dump(mode='json')),
+      len(slots),
+    )
 
-    ckpt_path = output_dir / 'checkpoint.jsonl'
-    ckpt = CheckpointManager(ckpt_path)
-    ckpt.save_header(
-      config_hash=config_hash,
-      subsystem='generate',
-      args={
+    ckpt = write_checkpoint_header(
+      run_ctx.output_dir,
+      run_ctx.config_hash,
+      'generate',
+      {
         'dataset_id': config.dataset_id,
         'total_count': config.total_count,
         'model': config.run.model,
         'step_names': step_names,
       },
     )
+    return slots, steps, ckpt, run_ctx.config_hash
 
-    output.info(f'Generating {len(slots)} items with steps: {step_names}')
+  async def _dispatch_parallel_slots(
+    self,
+    slots: list[dict],
+    config: GeneratorConfig[C],
+    steps: list[Step],
+    ckpt: CheckpointManager,
+    output: EvaluationOutputProtocol,
+  ) -> list[DataItem[IT]]:
+    """Run all slots in parallel, collecting successfully assembled items.
 
+    Returns:
+      List of successfully assembled :class:`DataItem` instances.
+    """
     items: list[DataItem[IT]] = []
-
-    async def process_slot(slot: dict) -> dict:
-      slot_id = slot['id']
-      if ckpt.is_completed(slot_id):
-        return {'id': slot_id, 'skipped': True}
-      try:
-        result = await run_step_workflow(
-          steps=steps,
-          initial_context={'slot': slot},
-          model=config.run.model,
-          run_config=config.run,
-        )
-        item = self.assemble_item(slot, result)
-        if item is not None:
-          ckpt.save_event('result', slot_id, {'item': item.model_dump()})
-          return {'id': slot_id, 'item': item}
-        else:
-          ckpt.save_event('skip', slot_id, {'reason': 'rejected by assemble_item'})
-          return {'id': slot_id, 'skipped': True}
-      except (OSError, ValueError, KeyError, RuntimeError) as exc:
-        logger.warning('slot %s failed: %s', slot_id, exc)
-        ckpt.save_event('error', slot_id, {'error': str(exc)})
-        return {'id': slot_id, 'error': str(exc)}
-
     limiter = SlidingWindowLimiter(config.run.max_rpm, config.run.rpm_safety_margin)
-    runner = ParallelRunner(config.run.num_parallel, limiter=limiter)
 
     def on_complete(result: dict) -> None:
       item = result.get('item')
       if item is not None:
         items.append(item)
 
-    await runner.run(slots, process_slot, on_complete=on_complete)
+    await run_parallel_items(
+      slots,
+      lambda s: self._process_slot_ckpt(ckpt, steps, config, output, s, for_resume=False),
+      limiter,
+      config.run.num_parallel,
+      output,
+      on_complete=on_complete,
+    )
+    return items
 
-    output.info(f'Generated {len(items)} items, writing output...')
+  def _write_generator_outputs(
+    self,
+    items: list[DataItem[IT]],
+    config: GeneratorConfig[C],
+    config_hash: str,
+    output_dir: Path,
+    ckpt: CheckpointManager,
+    output: EvaluationOutputProtocol,
+  ) -> dict[str, Any]:
+    """Write all.jsonl, splits, metadata.json, and emit summary.
 
+    Returns:
+      Summary dict including checkpoint stats, item counts, and split sizes.
+    """
     dataset = ListDataset(items)
     splitter = StratifiedSplitter(
       ratios=config.split_ratios,
@@ -165,7 +271,6 @@ class GeneratorAgent(StepAgent, Generic[C, IT]):
     splits = splitter.split(dataset)
 
     dataset.to_jsonl(output_dir / 'all.jsonl')
-
     for split_name, split_ds in splits.items():
       split_ds.to_jsonl(output_dir / f'{split_name}.jsonl')
 
@@ -178,28 +283,58 @@ class GeneratorAgent(StepAgent, Generic[C, IT]):
     }
     atomic_write_json(output_dir / 'metadata.json', metadata)
 
-    summary = ckpt.summary()
+    summary: dict[str, Any] = ckpt.summary()
     summary['total_items'] = len(items)
     summary['splits'] = {name: len(ds) for name, ds in splits.items()}
     output.result(summary)
     return summary
 
+  async def async_run(
+    self,
+    config: GeneratorConfig[C],
+    output_dir: Path,
+    output: EvaluationOutputProtocol,
+  ) -> dict[str, Any]:
+    """Full run: plan slots -> run step workflow per slot -> split -> write.
+
+    Returns:
+      Summary dict written via ``output`` and returned to the caller.
+    """
+    slots, steps, ckpt, config_hash = self._generator_run_setup(config, output_dir)
+    output.info(f'Generating {len(slots)} items with steps: {[s.name for s in steps]}')
+    items = await self._dispatch_parallel_slots(slots, config, steps, ckpt, output)
+    output.info(f'Generated {len(items)} items, writing output...')
+    return self._write_generator_outputs(items, config, config_hash, output_dir, ckpt, output)
+
   async def resume(
     self,
     checkpoint_path: Path,
     config: GeneratorConfig[C],
-    output_dir: Path,
-    output: Output,
-  ) -> dict:
-    """Resume from checkpoint, re-run only incomplete slots."""
+    output: EvaluationOutputProtocol,
+  ) -> dict[str, Any]:
+    """Resumes generation from an existing checkpoint file.
+
+    Re-creates slots from config, identifies incomplete ones via the
+    checkpoint, and re-runs only the remaining slots. Previously
+    completed items are loaded from checkpoint events.
+
+    Args:
+      checkpoint_path: Path to the ``checkpoint.jsonl`` file.
+      config: Same generator config used for the original run.
+      output: Output sink satisfying :class:`EvaluationOutputProtocol`.
+
+    Returns:
+      Summary dict with resumed item count and checkpoint statistics.
+    """
     slots = self.create_slots(config)
     steps = self.define_steps(config)
 
-    ckpt = CheckpointManager(checkpoint_path)
+    run_ctx = EvalRunContext(checkpoint_path.parent, '', len(slots))
+    ckpt = CheckpointManager(run_ctx.checkpoint_path())
     completed = ckpt.completed_ids()
     remaining = [s for s in slots if s['id'] not in completed]
 
-    output.info(f'Resuming: {len(completed)} done, {len(remaining)} remaining')
+    resume_from_checkpoint(ckpt, output, run_ctx.total_items)
 
     items: list[DataItem[IT]] = []
 
@@ -211,44 +346,33 @@ class GeneratorAgent(StepAgent, Generic[C, IT]):
       if isinstance(raw_item, dict):
         items.append(DataItem.model_validate(raw_item))
 
-    async def process_slot(slot: dict) -> dict:
-      slot_id = slot['id']
-      try:
-        result = await run_step_workflow(
-          steps=steps,
-          initial_context={'slot': slot},
-          model=config.run.model,
-          run_config=config.run,
-        )
-        item = self.assemble_item(slot, result)
-        if item is not None:
-          ckpt.save_event('result', slot_id, {'item': item.model_dump()})
-          return {'id': slot_id, 'item': item}
-        else:
-          ckpt.save_event('skip', slot_id, {'reason': 'rejected'})
-          return {'id': slot_id, 'skipped': True}
-      except (OSError, ValueError, KeyError, RuntimeError) as exc:
-        logger.warning('slot %s failed during resume: %s', slot_id, exc)
-        ckpt.save_event('error', slot_id, {'error': str(exc)})
-        return {'id': slot_id, 'error': str(exc)}
-
     limiter = SlidingWindowLimiter(config.run.max_rpm, config.run.rpm_safety_margin)
-    runner = ParallelRunner(config.run.num_parallel, limiter=limiter)
 
     def on_complete(result: dict) -> None:
       item = result.get('item')
       if item is not None:
         items.append(item)
 
-    await runner.run(remaining, process_slot, on_complete=on_complete)
+    await run_parallel_items(
+      remaining,
+      lambda s: self._process_slot_ckpt(ckpt, steps, config, output, s, for_resume=True),
+      limiter,
+      config.run.num_parallel,
+      output,
+      on_complete=on_complete,
+    )
 
-    summary = ckpt.summary()
+    summary: dict[str, Any] = ckpt.summary()
     summary['resumed_items'] = len(items)
     output.result(summary)
     return summary
 
-  def dry_run(self, config: GeneratorConfig[C], output: Output) -> dict:
-    """Plan slots + list steps, no LLM calls."""
+  def dry_run(self, config: GeneratorConfig[C], output: EvaluationOutputProtocol) -> dict[str, Any]:
+    """Plan slots + list steps, no LLM calls.
+
+    Returns:
+      Dict describing planned slots, step names, split ratios, model, and dataset id.
+    """
     slots = self.create_slots(config)
     steps = self.define_steps(config)
     result = {

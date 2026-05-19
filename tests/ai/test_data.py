@@ -10,9 +10,9 @@ class SimpleCustom(BaseModel):
   difficulty: str
 
 
-def make_item(id: str, domain: str = 'math', difficulty: str = 'easy') -> DataItem[SimpleCustom]:
+def make_item(id_: str, domain: str = 'math', difficulty: str = 'easy') -> DataItem[SimpleCustom]:
   return DataItem(
-    id=id,
+    id=id_,
     turns=[ConversationTurn(role='user', content='test')],
     custom=SimpleCustom(domain=domain, difficulty=difficulty),
   )
@@ -40,9 +40,9 @@ class TestListDataset:
     p.write_text('\n'.join(i.model_dump_json() for i in items), encoding='utf-8')
     loaded = ListDataset.from_jsonl(p, DataItem[SimpleCustom])
     assert len(loaded) == 2
-    assert loaded[0].id == 'x'
+    assert loaded[0].item_id == 'x'
     assert loaded[0].custom.domain == 'physics'
-    assert loaded[1].id == 'y'
+    assert loaded[1].item_id == 'y'
 
   def test_to_jsonl(self, tmp_path):
     p = tmp_path / 'out.jsonl'
@@ -50,7 +50,7 @@ class TestListDataset:
     ListDataset(items).to_jsonl(p)
     lines = p.read_text(encoding='utf-8').strip().split('\n')
     assert len(lines) == 2
-    assert DataItem[SimpleCustom].model_validate_json(lines[0]).id == 'a'
+    assert DataItem[SimpleCustom].model_validate_json(lines[0]).item_id == 'a'
 
   def test_from_to_round_trip(self, tmp_path):
     p = tmp_path / 'round.jsonl'
@@ -66,8 +66,8 @@ class TestListDataset:
     ds = ListDataset(items)
     sub = ds.subset([1, 3])
     assert len(sub) == 2
-    assert sub[0].id == '1'
-    assert sub[1].id == '3'
+    assert sub[0].item_id == '1'
+    assert sub[1].item_id == '3'
 
   def test_subset_preserves_items(self):
     items = [make_item('a'), make_item('b')]
@@ -93,7 +93,7 @@ class TestStratifiedSplitter:
     s1 = StratifiedSplitter(ratios, lambda it: it.custom.domain, seed=42).split(ds)
     s2 = StratifiedSplitter(ratios, lambda it: it.custom.domain, seed=42).split(ds)
     for name in ratios:
-      assert [x.id for x in ds_items(s1[name])] == [x.id for x in ds_items(s2[name])]
+      assert [x.item_id for x in ds_items(s1[name])] == [x.item_id for x in ds_items(s2[name])]
 
   def test_different_seeds_differ(self):
     items = [make_item(f'id{i}', domain='d') for i in range(30)]
@@ -101,8 +101,8 @@ class TestStratifiedSplitter:
     ratios = {'train': 0.8, 'val': 0.1, 'test': 0.1}
     s1 = StratifiedSplitter(ratios, lambda it: it.custom.domain, seed=1).split(ds)
     s2 = StratifiedSplitter(ratios, lambda it: it.custom.domain, seed=2).split(ds)
-    t1 = {x.id for x in ds_items(s1['train'])}
-    t2 = {x.id for x in ds_items(s2['train'])}
+    t1 = {x.item_id for x in ds_items(s1['train'])}
+    t2 = {x.item_id for x in ds_items(s2['train'])}
     assert t1 != t2
 
   def test_ratios_respected(self):
@@ -115,11 +115,8 @@ class TestStratifiedSplitter:
     assert abs(len(out['test']) / 100 - 0.1) <= 0.05
 
   def test_matched_distributions(self):
-    items = []
-    for i in range(50):
-      items.append(make_item(f'a{i}', domain='A'))
-    for i in range(50):
-      items.append(make_item(f'b{i}', domain='B'))
+    items = [make_item(f'a{i}', domain='A') for i in range(50)]
+    items.extend(make_item(f'b{i}', domain='B') for i in range(50))
     ds = ListDataset(items)
     ratios = {'train': 0.8, 'val': 0.1, 'test': 0.1}
     out = StratifiedSplitter(ratios, lambda it: it.custom.domain, seed=7).split(ds)
@@ -146,12 +143,12 @@ class TestStratifiedSplitter:
     items = [make_item(f'id{i}') for i in range(40)]
     ds = ListDataset(items)
     ratios = {'train': 0.5, 'val': 0.25, 'test': 0.25}
-    out = StratifiedSplitter(ratios, lambda it: it.id, seed=9).split(ds)
+    out = StratifiedSplitter(ratios, lambda it: it.item_id, seed=9).split(ds)
     seen: set[str] = set()
     for name in ratios:
       for x in ds_items(out[name]):
-        assert x.id not in seen
-        seen.add(x.id)
+        assert x.item_id not in seen
+        seen.add(x.item_id)
     assert len(seen) == 40
 
   def test_single_item_group(self):
@@ -260,11 +257,12 @@ class TestSlotPlanner:
     }
     slots = SlotPlanner(v, seed=0).create_slots(8)
     for s in slots:
-      assert 'u' in s and 'w' in s
+      assert 'u' in s
+      assert 'w' in s
 
   def test_weighted_pick(self):
     var = VarDef(choices=['a', 'b'], distribution=[0.5, 0.5])
     planner = SlotPlanner({}, seed=0)
     choice, meta = planner.weighted_pick(var)
-    assert choice in ('a', 'b')
+    assert choice in {'a', 'b'}
     assert meta is None

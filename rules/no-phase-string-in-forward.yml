@@ -1,0 +1,16 @@
+id: no-phase-string-in-forward
+language: Python
+severity: error
+message: "Do not pass phase/mode strings to forward(). Train/eval is module state, not a forward argument (PHILOSOPHY.md)."
+rule:
+  kind: identifier
+  regex: "^(mode|phase)$"
+  inside:
+    kind: parameters
+    stopBy: end
+    inside:
+      kind: function_definition
+      has:
+        field: name
+        regex: "^forward$"
+      stopBy: end

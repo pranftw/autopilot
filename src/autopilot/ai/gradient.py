@@ -1,6 +1,6 @@
 """AI-layer gradient types and collation: TextGradient, GradientCollator, and built-ins.
 
-TextGradient is the LLM-oriented Gradient with direction, attribution, severity,
+TextGradient is the LLM-oriented Gradient with text, attribution, severity,
 and evidence items. GradientCollator aggregates per-item feedback into per-parameter
 gradients. CollationResult carries context (overall direction) and gradients
 (keyed by Parameter.id).
@@ -9,78 +9,184 @@ gradients. CollationResult carries context (overall direction) and gradients
 from autopilot.ai.agents.agent import Agent
 from autopilot.core.gradient import Gradient
 from autopilot.core.parameter import Parameter
-from autopilot.core.types import Datum
+from autopilot.core.types import Datum, EvalDatum, _hydrate_datum_base
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from dataclasses import fields as dc_fields
 from typing import Any
 import json
+
+AGENT_OUTPUT_ERROR_SNIPPET_LEN = 500
 
 
 @dataclass
 class TextGradient(Gradient):
-  """LLM-oriented gradient with collated direction and per-parameter attribution.
+  """LLM-oriented gradient with collated text and per-parameter attribution.
 
-  direction: high-level collated direction (shared across parameters)
-  attribution: what specifically needs to change for this parameter
-  severity: 0.0-1.0 indicating how strongly this parameter needs to change
+  Args:
+    text: The gradient text content (renamed from direction for clarity).
+    attribution: What specifically needs to change for this parameter.
+    severity: 0.0-1.0 indicating how strongly this parameter needs to change.
+
   Evidence is stored in inherited Datum.items as child Datum objects.
+  Legacy kwarg ``direction`` is rejected with a migration hint.
+
+  Note:
+    The primary content field is ``text``, not the legacy ``direction`` name.
+    Passing ``direction`` as a keyword argument raises ``TypeError`` with
+    migration guidance.
+
+  Example:
+    >>> from autopilot.ai.gradient import TextGradient
+    >>>
+    >>> grad = TextGradient(
+    ...   text='tighten constraints',
+    ...   attribution='drop vague rows',
+    ...   severity=0.7,
+    ... )
+    >>> grad.text
+    'tighten constraints'
   """
 
-  direction: str | None = None
+  text: str | None = None
   attribution: str | None = None
   severity: float = 0.0
 
-  def accumulate(self, other: 'TextGradient') -> 'TextGradient':
+  def __init__(
+    self,
+    text: str | None = None,
+    attribution: str | None = None,
+    severity: float = 0.0,
+    *,
+    items: list[Any] | None = None,
+    **kwargs: Any,
+  ) -> None:
+    """Initialize a TextGradient.
+
+    Args:
+      text: High-level gradient content (shared across parameters).
+      attribution: What specifically needs to change for this parameter.
+      severity: 0.0-1.0 indicating change urgency.
+      items: Child Datum evidence items (inherited from Datum).
+      **kwargs: Catches legacy ``direction`` kwarg with migration error.
+
+    Raises:
+      TypeError: When ``direction`` is passed (renamed to ``text``).
+    """
+    if 'direction' in kwargs:
+      msg = (
+        "TextGradient parameter 'direction' has been renamed to 'text'. "
+        "Use TextGradient(text='...') instead of TextGradient(direction='...')."
+      )
+      raise TypeError(msg)
+    if kwargs:
+      bad = ', '.join(sorted(kwargs))
+      msg = f'TextGradient() got unexpected keyword arguments: {bad}'
+      raise TypeError(msg)
+    super().__init__(items=items if items is not None else [])
+    self.text = text
+    self.attribution = attribution
+    self.severity = severity
+
+  def accumulate(self, other: 'TextGradient') -> 'TextGradient':  # ty: ignore[invalid-method-override]  # intentional homogeneous fan-in (CLAUDE.md: "fan-in uses homogeneous gradient types")
+    """Merge two TextGradients.
+
+    Merges text, attribution (joined with '; ' when both present),
+    items (concatenated), and severity (max). Cross-type accumulate raises
+    TypeError.
+
+    Args:
+      other: Another :class:`TextGradient` to merge into this one.
+
+    Returns:
+      New :class:`TextGradient` combining both operands.
+
+    Raises:
+      TypeError: If ``other`` is not a :class:`TextGradient`.
+    """
+    if not isinstance(other, TextGradient):
+      msg = (
+        f'Cannot accumulate TextGradient with {type(other).__name__}. '
+        f'Insert a conversion operator to coerce types before fan-in.'
+      )
+      raise TypeError(msg)
+    merged_text = self.text
+    if other.text:
+      merged_text = f'{self.text}; {other.text}' if self.text else other.text
+    merged_attribution = self.attribution
+    if other.attribution:
+      merged_attribution = (
+        f'{self.attribution}; {other.attribution}' if self.attribution else other.attribution
+      )
     return TextGradient(
-      direction=self.direction,
-      attribution=self.attribution,
-      items=self.items + other.items,
+      text=merged_text,
+      attribution=merged_attribution,
       severity=max(self.severity, other.severity),
-      metadata={**self.metadata, **other.metadata},
+      items=self.items + other.items,
     )
 
+  def todo_items(self) -> list[str]:
+    """Return attribution as the actionable todo item when present.
+
+    When attribution is ``None``, delegates to the base class default
+    extraction from ``render()``.
+
+    Returns:
+      List containing the attribution string, or base class fallback.
+    """
+    if self.attribution is not None:
+      return [self.attribution]
+    return super().todo_items()
+
   def render(self) -> str:
+    """Render text, attribution, evidence lines, and severity as readable output.
+
+    Returns:
+      Multi-line human-readable summary for prompts or logs.
+    """
     parts: list[str] = []
+    if self.text:
+      parts.append(f'Text: {self.text}')
     if self.attribution:
       parts.append(f'What to change: {self.attribution}')
     if self.items:
       parts.append('Supporting evidence:')
       for item in self.items:
-        line = item.feedback or item.error_message
-        if line:
-          parts.append(f'  - {line}')
+        if isinstance(item, EvalDatum):
+          line = item.feedback or item.error_message
+          if line:
+            parts.append(f'  - {line}')
     if self.severity > 0:
       parts.append(f'Severity: {self.severity:.2f}')
     return '\n'.join(parts)
 
   def to_dict(self) -> dict[str, Any]:
-    d = super().to_dict()
-    d['direction'] = self.direction
-    d['attribution'] = self.attribution
-    d['severity'] = self.severity
-    return d
+    """Serialize this gradient including text fields.
+
+    Returns:
+      Dict suitable for :meth:`from_dict` round-trips.
+    """
+    payload = super().to_dict()
+    payload['text'] = self.text
+    payload['attribution'] = self.attribution
+    payload['severity'] = self.severity
+    return payload
 
   @classmethod
   def from_dict(cls, data: dict[str, Any]) -> 'TextGradient':
-    data = dict(data)
-    stored_id = data.pop('id', None)
-    direction = data.pop('direction', None)
-    attribution = data.pop('attribution', None)
-    severity = data.pop('severity', 0.0)
-    items_raw = data.pop('items', [])
-    items = [Datum.from_dict(item) for item in items_raw]
-    names = {f.name for f in dc_fields(cls)}
-    filtered = {k: v for k, v in data.items() if k in names}
-    instance = cls(
-      direction=direction,
-      attribution=attribution,
-      severity=severity,
-      items=items,
-      **filtered,
+    """Deserialize a :class:`TextGradient` from :meth:`to_dict` output.
+
+    Args:
+      data: Mapping produced by :meth:`to_dict` or compatible callers.
+
+    Returns:
+      Hydrated :class:`TextGradient` instance.
+    """
+    return _hydrate_datum_base(
+      cls,
+      data,
+      hydrate_child=Datum.from_dict,
+      pop_type=True,
     )
-    if stored_id:
-      object.__setattr__(instance, '_id', stored_id)
-    return instance
 
 
 @dataclass
@@ -90,11 +196,36 @@ class CollationResult:
   context: high-level direction string, rendered once at top of optimizer prompt.
             AgentOptimizer receives this via update_context(collation_context=...).
   gradients: per-parameter Gradient instances, keyed by Parameter.id (auto-generated
-             12-char hex). Loss.backward() assigns each to the corresponding param.grad.
+             12-char hex). Used by Loss.compute_seed_gradient() to build the seed
+             gradient that enters the computation graph via graph.backward().
   """
 
   context: str
   gradients: dict[str, Gradient] = field(default_factory=dict)
+
+
+def assert_gradients_match_parameters(
+  gradients: Mapping[str, Gradient],
+  parameters: list[Parameter],
+) -> None:
+  """Verify gradient keys exactly match parameter ids.
+
+  Args:
+    gradients: Mapping of parameter id to gradient.
+    parameters: Declared parameters to match against.
+
+  Raises:
+    ValueError: If gradient keys differ from parameter ids.
+  """
+  allowed_ids = {p.id for p in parameters}
+  if set(gradients.keys()) != allowed_ids:
+    missing = sorted(allowed_ids - set(gradients))
+    extra = sorted(set(gradients) - allowed_ids)
+    msg = (
+      f'collator produced gradients that do not match declared parameters. '
+      f'missing={missing!r} extra={extra!r}'
+    )
+    raise ValueError(msg)
 
 
 class GradientCollator:
@@ -115,7 +246,43 @@ class GradientCollator:
     feedback: list[dict[str, Any]],
     parameters: list[Parameter],
   ) -> CollationResult:
+    """Collate per-item feedback into per-parameter gradients.
+
+    Args:
+      feedback: Entries shaped like loss feedback dicts with ``data`` / ``targets``.
+      parameters: Parameters that must receive exactly one gradient each.
+
+    Returns:
+      Collation context string and gradients keyed by parameter id.
+
+    Raises:
+      NotImplementedError: Subclasses must implement collation.
+    """
     raise NotImplementedError
+
+
+def _extract_eval_datum(entry: dict[str, Any]) -> EvalDatum | None:
+  """Extract the first EvalDatum from a loss feedback entry.
+
+  Handles both direct EvalDatum values and Datum wrappers produced by
+  ``_default_collate`` (which always returns ``Datum(items=[...])``) by
+  checking ``data``, then ``targets``, unwrapping Datum.items when needed.
+
+  Args:
+    entry: Loss feedback dict with ``data`` and optional ``targets`` keys.
+
+  Returns:
+    First EvalDatum found, or ``None`` when neither key yields one.
+  """
+  for key in ('data', 'targets'):
+    source = entry.get(key)
+    if isinstance(source, EvalDatum):
+      return source
+    if isinstance(source, Datum) and source.items:
+      for item in source.items:
+        if isinstance(item, EvalDatum):
+          return item
+  return None
 
 
 class ConcatCollator(GradientCollator):
@@ -126,14 +293,23 @@ class ConcatCollator(GradientCollator):
     feedback: list[dict[str, Any]],
     parameters: list[Parameter],
   ) -> CollationResult:
-    evidence_items: list[Datum] = []
+    """Join feedback into identical :class:`TextGradient` instances per parameter.
+
+    Args:
+      feedback: Eval datum entries with feedback or error messages.
+      parameters: Parameters to attribute (each gets the same evidence bundle).
+
+    Returns:
+      Collation result with shared context and per-parameter gradients.
+    """
+    evidence_items: list[EvalDatum] = []
     for entry in feedback:
-      data = entry['data']
-      if data.feedback or data.error_message:
+      source = _extract_eval_datum(entry)
+      if source is not None and (source.feedback or source.error_message):
         evidence_items.append(
-          Datum(
-            feedback=data.feedback,
-            error_message=data.error_message,
+          EvalDatum(
+            feedback=source.feedback,
+            error_message=source.error_message,
           )
         )
 
@@ -141,9 +317,10 @@ class ConcatCollator(GradientCollator):
     gradients: dict[str, Gradient] = {}
     for param in parameters:
       gradients[param.id] = TextGradient(
-        direction=context,
+        text=context,
         items=list(evidence_items),
       )
+    assert_gradients_match_parameters(gradients, parameters)
     return CollationResult(context=context, gradients=gradients)
 
 
@@ -151,6 +328,11 @@ class AgentCollator(GradientCollator):
   """Uses a read-only Agent to collate feedback into per-parameter gradients."""
 
   def __init__(self, agent: Agent) -> None:
+    """Create a collator backed by the given agent implementation.
+
+    Args:
+      agent: Agent whose :meth:`~Agent.run` returns JSON in the expected shape.
+    """
     self._agent = agent
 
   def collate(
@@ -158,6 +340,15 @@ class AgentCollator(GradientCollator):
     feedback: list[dict[str, Any]],
     parameters: list[Parameter],
   ) -> CollationResult:
+    """Build a prompt, run the agent, and parse structured per-parameter gradients.
+
+    Args:
+      feedback: Loss feedback entries with :class:`EvalDatum` payloads.
+      parameters: Parameters that must appear in the agent JSON response.
+
+    Returns:
+      Parsed :class:`CollationResult` from the agent output.
+    """
     prompt = self.build_prompt(feedback, parameters)
     result = self._agent.run(prompt)
     return self.parse_result(result.output, parameters)
@@ -167,22 +358,40 @@ class AgentCollator(GradientCollator):
     feedback: list[dict[str, Any]],
     parameters: list[Parameter],
   ) -> str:
-    parts: list[str] = []
-    parts.append(
-      'You are a gradient collator. Analyze the following feedback from evaluating '
-      'data points and produce a coherent summary with per-parameter attributions.'
-    )
+    """Construct the collator prompt describing feedback and parameter ids.
 
-    parts.append('\n## Feedback from evaluated data points\n')
+    Args:
+      feedback: Per-item evaluation records to summarize.
+      parameters: Parameters the agent must attribute in its JSON reply.
+
+    Returns:
+      Full prompt string passed to :meth:`~Agent.run`.
+    """
+    parts: list[str] = []
+    parts.extend(
+      [
+        (
+          'You are a gradient collator. Analyze the following feedback from evaluating '
+          'data points and produce a coherent summary with per-parameter attributions.'
+        ),
+        '\n## Feedback from evaluated data points\n',
+      ]
+    )
     for i, entry in enumerate(feedback):
-      data = entry['data']
-      parts.append(f'### Item {i + 1} (id: {data.id}, success: {data.success})')
-      if data.feedback:
-        parts.append(f'Feedback: {data.feedback}')
-      if data.error_message:
-        parts.append(f'Error: {data.error_message}')
-      if data.metadata:
-        parts.append(f'Metadata: {json.dumps(data.metadata)}')
+      data = entry.get('data')
+      eval_d = _extract_eval_datum(entry)
+      if eval_d is not None:
+        parts.append(f'### Item {i + 1} (id: {eval_d.id}, success: {eval_d.success})')
+        if eval_d.feedback:
+          parts.append(f'Feedback: {eval_d.feedback}')
+        if eval_d.error_message:
+          parts.append(f'Error: {eval_d.error_message}')
+        if eval_d.metadata:
+          parts.append(f'Metadata: {json.dumps(eval_d.metadata)}')
+      elif isinstance(data, Datum):
+        parts.append(f'### Item {i + 1} (id: {data.id})')
+      else:
+        parts.append(f'### Item {i + 1} (missing data field)')
       parts.append('')
 
     parts.append('## Parameters to attribute feedback to\n')
@@ -192,19 +401,23 @@ class AgentCollator(GradientCollator):
       if desc:
         parts.append(desc)
 
-    parts.append('\n## Required JSON response format\n')
-    parts.append(
-      'Respond with ONLY valid JSON (no markdown fencing):\n'
-      '{\n'
-      '  "direction": "<1-3 sentence high-level summary of what needs to change>",\n'
-      '  "parameters": {\n'
-      '    "<param_id>": {\n'
-      '      "attribution": "<what specifically needs to change for this parameter>",\n'
-      '      "severity": <0.0-1.0>,\n'
-      '      "evidence": ["<key feedback point 1>", "<key feedback point 2>"]\n'
-      '    }\n'
-      '  }\n'
-      '}'
+    parts.extend(
+      [
+        '\n## Required JSON response format\n',
+        (
+          'Respond with ONLY valid JSON (no markdown fencing):\n'
+          '{\n'
+          '  "direction": "<1-3 sentence high-level summary of what needs to change>",\n'
+          '  "parameters": {\n'
+          '    "<param_id>": {\n'
+          '      "attribution": "<what specifically needs to change for this parameter>",\n'
+          '      "severity": <0.0-1.0>,\n'
+          '      "evidence": ["<key feedback point 1>", "<key feedback point 2>"]\n'
+          '    }\n'
+          '  }\n'
+          '}'
+        ),
+      ]
     )
     return '\n'.join(parts)
 
@@ -213,37 +426,66 @@ class AgentCollator(GradientCollator):
     output: str,
     parameters: list[Parameter],
   ) -> CollationResult:
+    """Parse the agent's JSON response into :class:`CollationResult`.
+
+    Args:
+      output: Raw agent output expected to be JSON with ``direction`` and
+        ``parameters`` keys.
+      parameters: Declared parameters; ids must match the JSON object exactly.
+
+    Returns:
+      Collation with context string and per-parameter :class:`TextGradient`
+      instances.
+
+    Raises:
+      RuntimeError: If JSON parsing fails or required keys/shapes are invalid.
+      TypeError: If a parameter entry under ``parameters`` is not a JSON object.
+      ValueError: If the ``parameters`` object keys do not match ``parameters``.
+    """
     try:
       data = json.loads(output)
-    except json.JSONDecodeError:
-      raise RuntimeError(f'AgentCollator: failed to parse agent response as JSON: {output[:500]}')
+    except json.JSONDecodeError as exc:
+      snippet = output[:AGENT_OUTPUT_ERROR_SNIPPET_LEN]
+      msg = f'AgentCollator: failed to parse agent response as JSON: {snippet}'
+      raise RuntimeError(
+        msg,
+      ) from exc
 
     if 'direction' not in data or not isinstance(data['direction'], str):
-      raise RuntimeError(
-        f'AgentCollator: agent response missing or invalid "direction" key: {output[:500]}'
-      )
+      snippet = output[:AGENT_OUTPUT_ERROR_SNIPPET_LEN]
+      msg = f'AgentCollator: agent response missing or invalid "direction" key: {snippet}'
+      raise RuntimeError(msg)
     if 'parameters' not in data or not isinstance(data['parameters'], dict):
-      raise RuntimeError(
-        f'AgentCollator: agent response missing or invalid "parameters" key: {output[:500]}'
-      )
+      snippet = output[:AGENT_OUTPUT_ERROR_SNIPPET_LEN]
+      msg = f'AgentCollator: agent response missing or invalid "parameters" key: {snippet}'
+      raise RuntimeError(msg)
     direction = data['direction']
     param_data = data['parameters']
+
+    allowed_ids = {p.id for p in parameters}
+    parsed_ids = set(param_data.keys())
+    if parsed_ids != allowed_ids:
+      missing = sorted(allowed_ids - parsed_ids)
+      extra = sorted(parsed_ids - allowed_ids)
+      msg = (
+        f'AgentCollator: parameters object must contain exactly the declared parameter ids. '
+        f'missing={missing!r} extra={extra!r}'
+      )
+      raise ValueError(msg)
 
     gradients: dict[str, Gradient] = {}
     for param in parameters:
       pid = param.id
-      if pid in param_data:
-        p_info = param_data[pid]
-        if not isinstance(p_info, dict):
-          raise RuntimeError(
-            f'AgentCollator: parameter entry for {pid} is not a dict: {type(p_info)}'
-          )
-        evidence_items = [Datum(feedback=e) for e in p_info.get('evidence', [])]
-        gradients[pid] = TextGradient(
-          direction=direction,
-          attribution=p_info.get('attribution'),
-          severity=p_info.get('severity', 0.0),
-          items=evidence_items,
-        )
+      p_info = param_data[pid]
+      if not isinstance(p_info, dict):
+        msg = f'AgentCollator: parameter entry for {pid} is not a dict: {type(p_info).__name__}'
+        raise TypeError(msg)
+      evidence_items: list[Datum] = [EvalDatum(feedback=e) for e in p_info.get('evidence', [])]
+      gradients[pid] = TextGradient(
+        text=direction,
+        attribution=p_info.get('attribution'),
+        severity=p_info.get('severity', 0.0),
+        items=evidence_items,
+      )
 
     return CollationResult(context=direction, gradients=gradients)

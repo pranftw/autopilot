@@ -7,9 +7,11 @@ from autopilot.ai.gradient import (
   ConcatCollator,
   GradientCollator,
   TextGradient,
+  assert_gradients_match_parameters,
 )
 from autopilot.core.parameter import Parameter
-from autopilot.core.types import Datum
+from autopilot.core.types import Datum, EvalDatum
+from typing import Any, cast
 from unittest.mock import MagicMock
 import json
 import pytest
@@ -17,7 +19,7 @@ import pytest
 
 def _feedback(n: int) -> list[dict]:
   return [
-    {'data': Datum(feedback=f'feedback_{i}', error_message=f'err_{i}'), 'targets': None}
+    {'data': EvalDatum(feedback=f'feedback_{i}', error_message=f'err_{i}'), 'targets': None}
     for i in range(n)
   ]
 
@@ -47,7 +49,7 @@ class TestCollationResult:
   def test_gradients_keyed_by_id(self):
     params = _params(2)
     gradients = {p.id: TextGradient(attribution=f'for {p.id}') for p in params}
-    r = CollationResult(context='x', gradients=gradients)
+    r = CollationResult(context='x', gradients=cast(Any, gradients))
     for p in params:
       assert p.id in r.gradients
 
@@ -122,7 +124,11 @@ class TestAgentCollator:
 
   def test_prompt_includes_feedback(self):
     params = _params(1)
-    agent = _mock_agent_json({'direction': 'd', 'parameters': {}})
+    response = {
+      'direction': 'd',
+      'parameters': {params[0].id: {'attribution': 'x', 'severity': 0.0, 'evidence': []}},
+    }
+    agent = _mock_agent_json(response)
     collator = AgentCollator(agent)
     collator.collate(_feedback(2), params)
     prompt = agent.run.call_args[0][0]
@@ -131,7 +137,11 @@ class TestAgentCollator:
 
   def test_prompt_includes_param_render(self):
     p = _DescParam(requires_grad=True)
-    agent = _mock_agent_json({'direction': 'd', 'parameters': {}})
+    response = {
+      'direction': 'd',
+      'parameters': {p.id: {'attribution': 'x', 'severity': 0.0, 'evidence': []}},
+    }
+    agent = _mock_agent_json(response)
     collator = AgentCollator(agent)
     collator.collate(_feedback(1), [p])
     prompt = agent.run.call_args[0][0]
@@ -169,11 +179,13 @@ class TestAgentCollator:
     result = AgentCollator(agent).collate(_feedback(1), params)
     grad = result.gradients[params[0].id]
     assert isinstance(grad, TextGradient)
-    assert grad.direction == 'improve'
+    assert grad.text == 'improve'
     assert grad.attribution == 'add examples'
     assert grad.severity == 0.7
     assert len(grad.items) == 1
-    assert grad.items[0].feedback == 'point 1'
+    item0 = grad.items[0]
+    assert isinstance(item0, EvalDatum)
+    assert item0.feedback == 'point 1'
 
   def test_invalid_json_raises(self):
     agent = MagicMock()
@@ -181,7 +193,7 @@ class TestAgentCollator:
     with pytest.raises(RuntimeError, match='failed to parse'):
       AgentCollator(agent).collate(_feedback(1), _params(1))
 
-  def test_missing_param_in_response(self):
+  def test_missing_param_in_response_raises(self):
     params = _params(2)
     response = {
       'direction': 'd',
@@ -190,9 +202,8 @@ class TestAgentCollator:
       },
     }
     agent = _mock_agent_json(response)
-    result = AgentCollator(agent).collate(_feedback(1), params)
-    assert params[0].id in result.gradients
-    assert params[1].id not in result.gradients
+    with pytest.raises(ValueError, match='missing='):
+      AgentCollator(agent).collate(_feedback(1), params)
 
   def test_multiple_params(self):
     params = _params(2)
@@ -205,16 +216,25 @@ class TestAgentCollator:
     }
     agent = _mock_agent_json(response)
     result = AgentCollator(agent).collate(_feedback(1), params)
-    assert result.gradients[params[0].id].attribution == 'x'
-    assert result.gradients[params[1].id].attribution == 'y'
+    grad0 = result.gradients[params[0].id]
+    grad1 = result.gradients[params[1].id]
+    assert isinstance(grad0, TextGradient)
+    assert isinstance(grad1, TextGradient)
+    assert grad0.attribution == 'x'
+    assert grad1.attribution == 'y'
 
   def test_build_prompt_is_overrideable(self):
     class _Custom(AgentCollator):
       def build_prompt(self, feedback, parameters):
         return 'custom prompt'
 
-    agent = _mock_agent_json({'direction': 'd', 'parameters': {}})
-    _Custom(agent).collate(_feedback(1), _params(1))
+    params = _params(1)
+    response = {
+      'direction': 'd',
+      'parameters': {params[0].id: {'attribution': 'x', 'severity': 0.0, 'evidence': []}},
+    }
+    agent = _mock_agent_json(response)
+    _Custom(agent).collate(_feedback(1), params)
     assert agent.run.call_args[0][0] == 'custom prompt'
 
   def test_parse_result_is_overrideable(self):
@@ -243,11 +263,24 @@ class TestAgentCollator:
     with pytest.raises(RuntimeError):
       AgentCollator(agent).collate(_feedback(1), _params(1))
 
-  def test_all_params_missing_from_json(self):
+  def test_all_params_missing_from_json_raises(self):
     agent = _mock_agent_json({'direction': 'd', 'parameters': {}})
     params = _params(2)
-    result = AgentCollator(agent).collate(_feedback(1), params)
-    assert result.gradients == {}
+    with pytest.raises(ValueError, match='missing='):
+      AgentCollator(agent).collate(_feedback(1), params)
+
+  def test_extra_param_in_json_raises(self):
+    params = _params(1)
+    response = {
+      'direction': 'd',
+      'parameters': {
+        params[0].id: {'attribution': 'x', 'severity': 0.1, 'evidence': []},
+        'fake_id': {'attribution': 'y', 'severity': 0.2, 'evidence': []},
+      },
+    }
+    agent = _mock_agent_json(response)
+    with pytest.raises(ValueError, match='extra='):
+      AgentCollator(agent).collate(_feedback(1), params)
 
   def test_extra_keys_in_json_ignored(self):
     params = _params(1)
@@ -265,7 +298,14 @@ class TestAgentCollator:
   def test_prompt_uses_render_from_base(self):
     p_empty = Parameter(requires_grad=True)
     p_desc = _DescParam(requires_grad=True)
-    agent = _mock_agent_json({'direction': 'd', 'parameters': {}})
+    response = {
+      'direction': 'd',
+      'parameters': {
+        p_empty.id: {'attribution': 'a', 'severity': 0.0, 'evidence': []},
+        p_desc.id: {'attribution': 'b', 'severity': 0.0, 'evidence': []},
+      },
+    }
+    agent = _mock_agent_json(response)
     collator = AgentCollator(agent)
     collator.collate(_feedback(1), [p_empty, p_desc])
     prompt = agent.run.call_args[0][0]
@@ -285,3 +325,27 @@ class TestAgentCollator:
     agent = _mock_agent_json({'direction': None, 'parameters': {}})
     with pytest.raises(RuntimeError, match='direction'):
       AgentCollator(agent).collate(_feedback(1), _params(1))
+
+
+class TestAssertGradientsMatchParameters:
+  def test_matching_ids_passes(self):
+    params = _params(2)
+    gradients = {p.id: TextGradient(text='d') for p in params}
+    assert_gradients_match_parameters(gradients, params)
+
+  def test_extra_gradient_raises(self):
+    params = _params(1)
+    gradients = {params[0].id: TextGradient(text='d'), 'bogus': TextGradient(text='d')}
+    with pytest.raises(ValueError, match='extra=') as exc_info:
+      assert_gradients_match_parameters(gradients, params)
+    assert 'bogus' in str(exc_info.value)
+
+  def test_missing_gradient_raises(self):
+    params = _params(2)
+    gradients = {params[0].id: TextGradient(text='d')}
+    with pytest.raises(ValueError, match='missing=') as exc_info:
+      assert_gradients_match_parameters(gradients, params)
+    assert params[1].id in str(exc_info.value)
+
+  def test_empty_both_passes(self):
+    assert_gradients_match_parameters({}, [])

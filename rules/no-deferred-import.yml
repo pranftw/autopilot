@@ -1,0 +1,16 @@
+id: no-deferred-import
+language: Python
+severity: error
+message: "No deferred/inner imports. All imports must be at module top level (CLAUDE.md)."
+ignores:
+  - "tests/**"
+rule:
+  any:
+    - kind: import_statement
+      inside:
+        kind: function_definition
+        stopBy: end
+    - kind: import_from_statement
+      inside:
+        kind: function_definition
+        stopBy: end

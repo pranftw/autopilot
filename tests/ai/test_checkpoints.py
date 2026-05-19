@@ -24,20 +24,20 @@ class InMemoryCheckpointIO(CheckpointIO):
   """Test double: stores JSONL events in memory keyed by resolved path string."""
 
   def __init__(self) -> None:
-    self._store: dict[str, list[dict]] = {}
+    self.store_data: dict[str, list[dict]] = {}
 
   def save_event(self, path: Path, event: BaseModel) -> None:
     key = str(path.resolve())
-    if key not in self._store:
-      self._store[key] = []
-    self._store[key].append(json.loads(event.model_dump_json()))
+    if key not in self.store_data:
+      self.store_data[key] = []
+    self.store_data[key].append(json.loads(event.model_dump_json(by_alias=True)))
 
   def load(self, path: Path) -> list[dict]:
     key = str(path.resolve())
-    return list(self._store.get(key, []))
+    return list(self.store_data.get(key, []))
 
   def remove(self, path: Path) -> None:
-    self._store.pop(str(path.resolve()), None)
+    self.store_data.pop(str(path.resolve()), None)
 
 
 class TestCheckpointIO:
@@ -254,6 +254,6 @@ class TestCustomCheckpointIO:
     m = CheckpointManager(path, io=io)
     m.save_event('result', 'z', {})
     key = str(path.resolve())
-    assert key in io._store
-    assert len(io._store[key]) == 1
-    assert io._store[key][0]['id'] == 'z'
+    assert key in io.store_data
+    assert len(io.store_data[key]) == 1
+    assert io.store_data[key][0]['id'] == 'z'

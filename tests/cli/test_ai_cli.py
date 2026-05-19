@@ -1,8 +1,10 @@
 """Tests for AI CLI command registration, argument parsing, and judge handlers."""
 
 from autopilot.cli.commands.ai import GenerateRun, JudgeCommand, JudgeRun
+from autopilot.cli.context import CLIContext
 from autopilot.cli.main import build_parser
 from autopilot.cli.output import Output
+from autopilot.cli.primitives import ArgparseCLIError
 from autopilot.core.artifacts.epoch import DataArtifact
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -13,7 +15,7 @@ import pytest
 class TestGenerateParser:
   def test_run_requires_config(self) -> None:
     parser = build_parser()
-    with pytest.raises(SystemExit):
+    with pytest.raises(ArgparseCLIError):
       parser.parse_args(['ai', 'generate', 'run'])
 
   def test_run_accepts_all_flags(self) -> None:
@@ -43,19 +45,19 @@ class TestGenerateParser:
 
   def test_resume_requires_checkpoint(self) -> None:
     parser = build_parser()
-    with pytest.raises(SystemExit):
+    with pytest.raises(ArgparseCLIError):
       parser.parse_args(['ai', 'generate', 'resume'])
 
   def test_dry_run_requires_config(self) -> None:
     parser = build_parser()
-    with pytest.raises(SystemExit):
+    with pytest.raises(ArgparseCLIError):
       parser.parse_args(['ai', 'generate', 'dry-run'])
 
 
 class TestJudgeParser:
   def test_run_requires_input(self) -> None:
     parser = build_parser()
-    with pytest.raises(SystemExit):
+    with pytest.raises(ArgparseCLIError):
       parser.parse_args(['ai', 'judge', 'run'])
 
   def test_run_accepts_parallel_flags(self) -> None:
@@ -79,12 +81,12 @@ class TestJudgeParser:
 
   def test_resume_requires_both(self) -> None:
     parser = build_parser()
-    with pytest.raises(SystemExit):
+    with pytest.raises(ArgparseCLIError):
       parser.parse_args(['ai', 'judge', 'resume', '--checkpoint', 'cp.jsonl'])
 
   def test_summarize_requires_input(self) -> None:
     parser = build_parser()
-    with pytest.raises(SystemExit):
+    with pytest.raises(ArgparseCLIError):
       parser.parse_args(['ai', 'judge', 'summarize'])
 
   def test_distribution_parses(self) -> None:
@@ -126,23 +128,23 @@ def _make_judge_ctx(tmp_path: Path, experiment: str = 'test-exp') -> MagicMock:
   ctx.experiment = experiment
   ctx.epoch = 1
   ctx.output = Output(use_json=True)
+  ctx.fail = CLIContext.fail.__get__(ctx, type(ctx))
   ctx.judge = MagicMock()
   exp_dir = tmp_path / experiment
   exp_dir.mkdir(parents=True, exist_ok=True)
-  ctx.experiment_dir.return_value = exp_dir
+  ctx.experiment_path.return_value = exp_dir
   return ctx
 
 
 class TestJudgeDistribution:
   def test_distribution_no_epoch(self, tmp_path: Path) -> None:
     ctx = _make_judge_ctx(tmp_path)
-    ctx.epoch = 0
-    ctx.output = MagicMock()
+    ctx.epoch = None
     cmd = JudgeCommand()
-    args = MagicMock(epoch=0)
-    cmd.distribution(ctx, args)
-    ctx.output.error.assert_called_once()
-    ctx.output.result.assert_not_called()
+    args = MagicMock(epoch=None)
+    with pytest.raises(SystemExit) as exc_info:
+      cmd.distribution(ctx, args)
+    assert exc_info.value.code == 1
 
   def test_distribution_happy_path(self, tmp_path: Path, capsys) -> None:
     ctx = _make_judge_ctx(tmp_path)

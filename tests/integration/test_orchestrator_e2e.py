@@ -3,19 +3,36 @@
 from autopilot.core.callbacks.callback import Callback
 from autopilot.core.callbacks.cost import CostTrackerCallback
 from autopilot.core.callbacks.data_recorder import DataRecorderCallback
-from autopilot.core.callbacks.memory import MemoryCallback
-from autopilot.core.checkpoint import JSONCheckpoint
-from autopilot.core.experiment import PromotionExperiment
-from autopilot.core.logger import JSONLogger
+from autopilot.core.experiment import Experiment
 from autopilot.core.loops.orchestrator import EpochOrchestrator, OrchestratorConfig
-from autopilot.core.memory import FileMemory
 from autopilot.core.metric import Metric
-from autopilot.core.module import AutoPilotModule
-from autopilot.core.summary import build_experiment_summary, write_experiment_summary
-from autopilot.core.trainer import Trainer
-from autopilot.core.types import Datum
+from autopilot.core.module.autopilot_module import AutoPilotModule
+from autopilot.core.trainer.trainer import Trainer
+from autopilot.core.types import Datum, EvalDatum
+from typing import Any
 from unittest.mock import MagicMock
 import pytest
+
+
+class RollbackExperiment(Experiment):
+  """Experiment with store + rollback for orchestrator integration tests."""
+
+  def __init__(self, store=None):
+    super().__init__(experiment_id='orch-e2e')
+    self.store = store
+    self.should_rollback = False
+    self.rollback_calls: list[int | None] = []
+
+  def on_epoch_complete(self, epoch: int, metrics: dict[str, float], **kwargs: Any) -> None:
+    pass
+
+  def on_validation_complete(self, epoch: int, metrics: dict[str, float], **kwargs: Any) -> None:
+    pass
+
+  def rollback(self, epoch: int | None) -> None:
+    self.rollback_calls.append(epoch)
+    if self.store:
+      self.store.checkout(epoch)
 
 
 class IntegrationModule(AutoPilotModule):
@@ -25,15 +42,15 @@ class IntegrationModule(AutoPilotModule):
     self._epoch_idx = 0
 
   def forward(self, batch):
-    return Datum(success=True)
+    return EvalDatum(success=True)
 
-  def training_step(self, batch):
+  def training_step(self, batch, batch_idx):
     acc = self._schedule[min(self._epoch_idx, len(self._schedule) - 1)]
-    return Datum(success=acc > 0.5, metrics={'accuracy': acc})
+    return EvalDatum(success=acc > 0.5, metrics={'accuracy': acc})
 
-  def validation_step(self, batch):
+  def validation_step(self, batch, batch_idx):
     acc = self._schedule[min(self._epoch_idx, len(self._schedule) - 1)]
-    return Datum(success=acc > 0.5, metrics={'accuracy': acc})
+    return EvalDatum(success=acc > 0.5, metrics={'accuracy': acc})
 
   def configure_optimizers(self):
     return None
@@ -63,18 +80,15 @@ class TestFullLoopHappyPath:
   def test_two_epochs_with_callbacks(self, tmp_path):
     module = IntegrationModule(accuracy_schedule=[0.6, 0.8])
     module.metric = IntegrationMetric()
-    memory = FileMemory(tmp_path)
     cost = CostTrackerCallback(tmp_path)
     recorder = DataRecorderCallback(tmp_path)
-    mem_cb = MemoryCallback(memory)
 
     trainer = Trainer(
       loop=EpochOrchestrator(),
-      callbacks=[recorder, mem_cb, cost],
+      callbacks=[recorder, cost],
     )
     result = trainer.fit(module, train_dataloaders=[1, 2], max_epochs=2)
     assert result['total_epochs'] == 2
-    assert len(memory.recall()) == 2
 
   def test_artifacts_produced(self, tmp_path):
     module = IntegrationModule(accuracy_schedule=[0.7, 0.8])
@@ -87,33 +101,27 @@ class TestFullLoopHappyPath:
       callbacks=[recorder, cost],
     )
     trainer.fit(module, train_dataloaders=[1], max_epochs=2)
-    assert (tmp_path / 'epoch_1' / 'data.jsonl').exists()
+    assert (tmp_path / 'epoch_0' / 'data.jsonl').exists()
     assert (tmp_path / 'cost_summary.json').exists()
 
 
-class TestRegressionRollback:
-  def test_regression_triggers_rollback(self, tmp_path):
+class TestOrchestratorRollbackWhenShouldRollback:
+  def test_should_rollback_triggers_checkout(self, tmp_path):
     module = IntegrationModule(accuracy_schedule=[0.8, 0.5, 0.9])
     module.metric = IntegrationMetric()
     store = MagicMock()
-    config = OrchestratorConfig(auto_rollback=True)
+    config = OrchestratorConfig(auto_rollback=True, plateau_window=0)
+    experiment = RollbackExperiment(store=store)
 
-    experiment = PromotionExperiment(
-      tmp_path,
-      slug='orch-e2e',
-      logger=JSONLogger(tmp_path),
-      checkpoint=JSONCheckpoint(),
-      store=store,
-      threshold_pct=0.0,
-    )
-    experiment.best_baseline_artifact.write(
-      {'epoch': 1, 'metrics': {'accuracy': 0.8}},
-      tmp_path,
-    )
+    class RegCallback(Callback):
+      def on_epoch_end(self, trainer, module, epoch, result=None):
+        if epoch == 1:
+          trainer.experiment.should_rollback = True
 
     trainer = Trainer(
       loop=EpochOrchestrator(config),
       experiment=experiment,
+      callbacks=[RegCallback()],
     )
     trainer.fit(
       module,
@@ -121,7 +129,7 @@ class TestRegressionRollback:
       val_dataloaders=[1],
       max_epochs=3,
     )
-    store.checkout.assert_called()
+    store.checkout.assert_called_with(0)
 
 
 class TestPlateauDetection:
@@ -149,24 +157,7 @@ class TestDryRun:
     )
     result = trainer.fit(module, train_dataloaders=[1], max_epochs=5)
     assert result.get('dry_run') is True
-    assert not (tmp_path / 'epoch_1').exists()
-
-
-class TestExperimentSummary:
-  def test_summary_produced(self, tmp_path):
-    module = IntegrationModule(accuracy_schedule=[0.6, 0.8])
-    module.metric = IntegrationMetric()
-    cost = CostTrackerCallback(tmp_path)
-
-    trainer = Trainer(
-      loop=EpochOrchestrator(),
-      callbacks=[cost],
-    )
-    result = trainer.fit(module, train_dataloaders=[1], max_epochs=2)
-    summary = build_experiment_summary(tmp_path, result, cost_tracker=cost)
-    path = write_experiment_summary(tmp_path, summary)
-    assert path.exists()
-    assert summary.total_epochs == 2
+    assert not (tmp_path / 'epoch_0').exists()
 
 
 class TestCallbackOrdering:
@@ -176,19 +167,19 @@ class TestCallbackOrdering:
     hooks: list[str] = []
 
     class OrderTracker(Callback):
-      def on_fit_start(self, trainer):
+      def on_fit_start(self, trainer, module):
         hooks.append('fit_start')
 
-      def on_train_epoch_start(self, trainer, epoch):
+      def on_train_epoch_start(self, trainer, module, epoch):
         hooks.append(f'train_start_{epoch}')
 
-      def on_train_epoch_end(self, trainer, epoch):
+      def on_train_epoch_end(self, trainer, module, epoch):
         hooks.append(f'train_end_{epoch}')
 
-      def on_epoch_end(self, trainer, epoch, result=None):
+      def on_epoch_end(self, trainer, module, epoch, result=None):
         hooks.append(f'epoch_end_{epoch}')
 
-      def on_fit_end(self, trainer):
+      def on_fit_end(self, trainer, module):
         hooks.append('fit_end')
 
     trainer = Trainer(
@@ -197,9 +188,9 @@ class TestCallbackOrdering:
     )
     trainer.fit(module, train_dataloaders=[1], max_epochs=1)
     assert hooks[0] == 'fit_start'
-    assert 'train_start_1' in hooks
-    assert 'train_end_1' in hooks
-    assert 'epoch_end_1' in hooks
+    assert 'train_start_0' in hooks
+    assert 'train_end_0' in hooks
+    assert 'epoch_end_0' in hooks
     assert hooks[-1] == 'fit_end'
 
 
@@ -220,8 +211,9 @@ class TestCallbackException:
     module.metric = IntegrationMetric()
 
     class BrokenCallback(Callback):
-      def on_train_epoch_end(self, trainer, epoch):
-        raise RuntimeError('callback failure')
+      def on_train_epoch_end(self, trainer, module, epoch):
+        msg = 'callback failure'
+        raise RuntimeError(msg)
 
     trainer = Trainer(
       loop=EpochOrchestrator(),

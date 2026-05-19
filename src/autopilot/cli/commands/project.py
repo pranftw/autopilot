@@ -1,15 +1,55 @@
-"""Project management: create, list, and check project health."""
+"""Project management: create, list, and check project health.
 
-from autopilot.cli.command import Argument, Command, argument, subcommand
+Template resolution order for ``project init``:
+
+1. Workspace path (``AutoPilotConfig.templates_path / 'project' / filename``)
+2. Package bundled defaults (``importlib.resources.files('autopilot') / 'templates' / ...``)
+
+Workspace templates override bundled defaults when both exist.
+"""
+
+from autopilot.cli.command import Command
 from autopilot.cli.context import CLIContext
-from autopilot.core.config import list_projects
+from autopilot.cli.primitives import Argument, argument, subcommand
+from autopilot.core.config import AutoPilotConfig
 from pathlib import Path
 import argparse
-import autopilot.core.paths as paths
+import importlib.resources
 
 
-def _read_template(filename: str, **kwargs: str) -> str:
-  text = (paths.project_templates_dir() / filename).read_text(encoding='utf-8')
+def _read_template(config: AutoPilotConfig, filename: str, **kwargs: str) -> str:
+  """Read a project template, falling back to package bundled defaults.
+
+  Lookup order:
+    1. Workspace ``templates/project/<filename>``
+    2. Package ``autopilot/templates/project/<filename>``
+
+  Args:
+    config: Config with ``templates_path`` for workspace lookup.
+    filename: Template filename (e.g. ``cli.py``).
+    **kwargs: Format substitutions applied to the template text.
+
+  Returns:
+    Template text with substitutions applied.
+
+  Raises:
+    FileNotFoundError: When the template is missing from both locations.
+  """
+  workspace_path = config.templates_path / 'project' / filename
+  if workspace_path.exists():
+    text = workspace_path.read_text(encoding='utf-8')
+    return text.format(**kwargs) if kwargs else text
+
+  pkg_base = importlib.resources.files('autopilot')
+  pkg_ref = pkg_base.joinpath('templates').joinpath('project').joinpath(filename)
+  try:
+    text = pkg_ref.read_text(encoding='utf-8')
+  except (FileNotFoundError, TypeError) as exc:
+    msg = (
+      f'template {filename!r} not found in workspace ({workspace_path}) '
+      f'or package bundle; create it or install the full autopilot package'
+    )
+    raise FileNotFoundError(msg) from exc
   return text.format(**kwargs) if kwargs else text
 
 
@@ -21,6 +61,8 @@ def _write_if_missing(path: Path, content: str) -> bool:
 
 
 class ProjectInit(Command):
+  """Creates a project directory with standard layout and skeleton files."""
+
   name = 'init'
   help = 'Initialize a new project'
   project_name = Argument('name', help='project name')
@@ -28,28 +70,40 @@ class ProjectInit(Command):
 
   def forward(self, ctx: CLIContext, args: argparse.Namespace) -> None:
     """Create a project directory with standard layout and optional skeleton files."""
-    ws = ctx.workspace
     name = args.name
     bare = args.bare
-    project_dir = paths.root(ws, name)
+    config = AutoPilotConfig(workspace=ctx.workspace, project=name)
+    project_dir = config.root
 
     project_dir.mkdir(parents=True, exist_ok=True)
     (project_dir / 'ai').mkdir(exist_ok=True)
-    paths.experiments(ws, name).mkdir(exist_ok=True)
-    paths.datasets(ws, name).mkdir(exist_ok=True)
-    records_dir = paths.records(ws, name)
+    config.experiments_path.mkdir(exist_ok=True)
+    config.datasets_path.mkdir(exist_ok=True)
+    records_dir = config.records_path
     records_dir.mkdir(exist_ok=True)
     (records_dir / 'promotions').mkdir(exist_ok=True)
     (records_dir / 'notes').mkdir(exist_ok=True)
 
     files_created: list[str] = []
     if not bare:
-      if _write_if_missing(project_dir / 'cli.py', _read_template('cli.py', name=name)):
-        files_created.append('cli.py')
-      if _write_if_missing(project_dir / 'module.py', _read_template('module.py')):
-        files_created.append('module.py')
-      if _write_if_missing(project_dir / 'data.py', _read_template('data.py')):
-        files_created.append('data.py')
+      for tpl_name, tpl_kwargs in [
+        ('cli.py', {'name': name}),
+        ('module.py', {}),
+        ('data.py', {}),
+        ('CLAUDE.md', {'name': name}),
+      ]:
+        try:
+          content = _read_template(ctx.config, tpl_name, **tpl_kwargs)
+        except FileNotFoundError:
+          continue
+        if _write_if_missing(project_dir / tpl_name, content):
+          files_created.append(tpl_name)
+      try:
+        cfg_content = _read_template(ctx.config, 'config.py', name=name)
+        if _write_if_missing(project_dir / 'config.py', cfg_content):
+          files_created.append('config.py')
+      except FileNotFoundError:
+        pass
 
     ctx.output.result(
       {
@@ -62,53 +116,53 @@ class ProjectInit(Command):
 
 
 class ProjectCommand(Command):
+  """``autopilot project`` group: init, list, and doctor health checks."""
+
   name = 'project'
   help = 'Project management'
 
   def __init__(self) -> None:
+    """Wire project subcommands (``init`` plus inline ``list`` / ``doctor``)."""
     super().__init__()
     self.init = ProjectInit()
 
-  @subcommand('list', help='List all projects')
+  @subcommand('list', help_text='List all projects')
   def list(self, ctx: CLIContext, args: argparse.Namespace) -> None:
     """List all discovered projects in the workspace."""
-    ws = ctx.workspace
-    projects = list_projects(ws)
+    pdir = ctx.config.projects_path
+    if not pdir.exists():
+      projects: list[str] = []
+    else:
+      projects = sorted(child.name for child in pdir.iterdir() if child.is_dir())
 
     rows = [{'name': name} for name in projects]
-
     if rows:
       ctx.output.table(rows, ['name'])
 
-    ctx.output.result(
-      {
-        'projects': projects,
-      }
-    )
+    ctx.output.result({'projects': projects})
 
   @argument('name', help='project name')
-  @subcommand('doctor', help='Check project health')
+  @subcommand('doctor', help_text='Check project health')
   def doctor(self, ctx: CLIContext, args: argparse.Namespace) -> None:
     """Check project health: required dirs and skeleton files."""
-    ws = ctx.workspace
     name = args.name
-    project_dir = paths.root(ws, name)
+    config = AutoPilotConfig(workspace=ctx.workspace, project=name)
 
     checks: dict[str, bool] = {}
     issues: list[str] = []
 
-    checks['project_dir'] = project_dir.is_dir()
-    checks['cli_py'] = paths.project_cli(ws, name).is_file()
-    checks['experiments_dir'] = paths.experiments(ws, name).is_dir()
-    checks['datasets_dir'] = paths.datasets(ws, name).is_dir()
-    checks['records_dir'] = paths.records(ws, name).is_dir()
+    checks['project_dir'] = config.root.is_dir()
+    checks['cli_py'] = config.cli_file.is_file()
+    checks['experiments_dir'] = config.experiments_path.is_dir()
+    checks['datasets_dir'] = config.datasets_path.is_dir()
+    checks['records_dir'] = config.records_path.is_dir()
 
     for key, ok in checks.items():
       if not ok:
         issues.append(key)
         ctx.output.warn(f'missing: {key}')
 
-    healthy = len(issues) == 0
+    healthy = not issues
     ctx.output.result(
       {
         'project': name,

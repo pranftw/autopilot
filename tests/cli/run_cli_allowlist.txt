@@ -1,0 +1,31 @@
+# Files that legitimately use run_cli() because they test mutating commands.
+# Files NOT in this list must use run_cli_no_context() for read-only / exempt commands.
+# See AP-1 in plan 22 (test infrastructure overhaul).
+test_experiment_fail_error.py
+test_experiment_lifecycle.py
+test_experiment_dependencies.py
+test_fingerprint_binding.py
+test_tree_switch_checkout.py
+test_tree_switch_param_registration.py
+test_test_infrastructure.py
+test_experiment_tree_ux.py
+test_cli_workflow_e2e.py
+test_query_sort_compare_tree_remove_cli.py
+test_checkout_cmd.py
+test_context_log_filtering.py
+test_cli_json_consistency.py
+test_cli_infrastructure.py
+test_merge_commands.py
+test_dry_run_e2e.py
+test_store.py
+test_tree_cmd.py
+test_experiment_cmd.py
+test_checkout_dry_run.py
+test_error_message_quality.py
+test_json_envelope.py
+test_experiment_add_options.py
+test_notes_write_file.py
+test_reflog_commands.py
+test_store_checkout_context_cli.py
+test_deploy_decision_entry.py
+conftest.py

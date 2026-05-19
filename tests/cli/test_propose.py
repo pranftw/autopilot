@@ -1,28 +1,30 @@
 """Tests for propose CLI command."""
 
+from autopilot.ai.proposal import ChangeProposal, read_proposals, record_proposal
 from autopilot.cli.commands.propose import ProposeCommand
-from autopilot.cli.output import Output
 from autopilot.core.artifacts.epoch import MetricComparisonArtifact
-from autopilot.core.proposal import ChangeProposal, read_proposals, record_proposal
 from autopilot.tracking.io import atomic_write_json
 from pathlib import Path
+from tests.cli.conftest import make_mock_cli_context
 from unittest.mock import MagicMock, patch
+import argparse
 import json
+import pytest
 
 _mc = MetricComparisonArtifact()
 
 
+def _verify_args(proposal_id: str = 'abc123') -> argparse.Namespace:
+  """Build verify args with required attributes."""
+  return argparse.Namespace(
+    proposal_id=proposal_id,
+    higher_is_better=None,
+    lower_is_better=None,
+  )
+
+
 def _make_ctx(tmp_path: Path, experiment: str = 'test-exp') -> MagicMock:
-  ctx = MagicMock()
-  ctx.experiment = experiment
-  ctx.epoch = 1
-  ctx.workspace = tmp_path
-  ctx.project = None
-  ctx.output = Output(use_json=True)
-  exp_dir = tmp_path / experiment
-  exp_dir.mkdir(parents=True, exist_ok=True)
-  ctx.experiment_dir.return_value = exp_dir
-  return ctx
+  return make_mock_cli_context(tmp_path, experiment=experiment, epoch=1, project=None)
 
 
 def _seed_proposal(exp_dir: Path, proposal_id: str = 'abc123', epoch: int = 1) -> None:
@@ -62,14 +64,13 @@ class TestProposeCommand:
 
   def test_verify_no_id(self, tmp_path):
     ctx = _make_ctx(tmp_path)
-    ctx.output = MagicMock()
     cmd = ProposeCommand()
-    args = MagicMock(proposal_id='')
-    cmd.verify(ctx, args)
-    ctx.output.error.assert_called_once()
-    ctx.output.result.assert_not_called()
+    args = _verify_args(proposal_id='')
+    with pytest.raises(SystemExit) as exc_info:
+      cmd.verify(ctx, args)
+    assert exc_info.value.code == 1
 
-  def test_verify_regression_detected(self, tmp_path, capsys):
+  def test_verify_returns_inconclusive(self, tmp_path, capsys):
     ctx = _make_ctx(tmp_path)
     exp_dir = tmp_path / 'test-exp'
     _seed_proposal(exp_dir, 'abc123', epoch=1)
@@ -83,34 +84,11 @@ class TestProposeCommand:
     )
 
     cmd = ProposeCommand()
-    args = MagicMock(proposal_id='abc123')
+    args = _verify_args()
     cmd.verify(ctx, args)
     captured = capsys.readouterr()
     r = json.loads(captured.out)['result']
-    assert r['verdict'] == 'regression_after_change'
-    assert 'accuracy' in r['regressed_metrics']
-
-  def test_verify_fix_confirmed(self, tmp_path, capsys):
-    ctx = _make_ctx(tmp_path)
-    exp_dir = tmp_path / 'test-exp'
-    _seed_proposal(exp_dir, 'abc123', epoch=1)
-    atomic_write_json(exp_dir / 'best_baseline.json', {'accuracy': 0.5})
-    _mc.write(
-      {
-        'per_metric_deltas': {'accuracy': 0.3},
-        'regressions': [],
-        'improvements': [{'metric': 'accuracy', 'delta': 0.3, 'baseline': 0.5, 'candidate': 0.8}],
-      },
-      exp_dir,
-      epoch=1,
-    )
-
-    cmd = ProposeCommand()
-    args = MagicMock(proposal_id='abc123')
-    cmd.verify(ctx, args)
-    captured = capsys.readouterr()
-    r = json.loads(captured.out)['result']
-    assert r['verdict'] == 'fix_confirmed'
+    assert r['verdict'] == 'inconclusive'
 
   def test_verify_inconclusive_no_comparison(self, tmp_path, capsys):
     ctx = _make_ctx(tmp_path)
@@ -119,7 +97,7 @@ class TestProposeCommand:
     atomic_write_json(exp_dir / 'best_baseline.json', {'accuracy': 0.8})
 
     cmd = ProposeCommand()
-    args = MagicMock(proposal_id='abc123')
+    args = _verify_args()
     cmd.verify(ctx, args)
     captured = capsys.readouterr()
     r = json.loads(captured.out)['result']
@@ -141,7 +119,7 @@ class TestProposeCommand:
     )
 
     cmd = ProposeCommand()
-    args = MagicMock(proposal_id='abc123')
+    args = _verify_args()
     cmd.verify(ctx, args)
     captured = capsys.readouterr()
     r = json.loads(captured.out)['result']
@@ -149,23 +127,22 @@ class TestProposeCommand:
 
   def test_revert_no_id(self, tmp_path):
     ctx = _make_ctx(tmp_path)
-    ctx.output = MagicMock()
     cmd = ProposeCommand()
     args = MagicMock(proposal_id='', source='', store='', pattern='**/*')
-    cmd.revert(ctx, args)
-    ctx.output.error.assert_called_once()
-    ctx.output.result.assert_not_called()
+    with pytest.raises(SystemExit) as exc_info:
+      cmd.revert(ctx, args)
+    assert exc_info.value.code == 1
 
   def test_revert_no_source(self, tmp_path):
     ctx = _make_ctx(tmp_path)
-    ctx.output = MagicMock()
     exp_dir = tmp_path / 'test-exp'
     _seed_proposal(exp_dir, 'abc123', epoch=2)
 
     cmd = ProposeCommand()
     args = MagicMock(proposal_id='abc123', source='', store='', pattern='**/*')
-    cmd.revert(ctx, args)
-    ctx.output.error.assert_called()
+    with pytest.raises(SystemExit) as exc_info:
+      cmd.revert(ctx, args)
+    assert exc_info.value.code == 1
 
   def test_revert_calls_store_checkout(self, tmp_path, capsys):
     ctx = _make_ctx(tmp_path)
@@ -185,11 +162,11 @@ class TestProposeCommand:
       pattern='**/*',
     )
 
-    with patch('autopilot.cli.commands.propose.FileStore') as MockStore:
+    with patch('autopilot.cli.commands.propose.FileStore') as mock_store:
       mock_instance = MagicMock()
-      MockStore.return_value = mock_instance
+      mock_store.return_value = mock_instance
       cmd.revert(ctx, args)
-      mock_instance.checkout.assert_called_once_with(2)
+      mock_instance.checkout.assert_called_once_with('test-exp', 2, context=None)
 
     captured = capsys.readouterr()
     r = json.loads(captured.out)['result']

@@ -1,27 +1,28 @@
 """Tests for AutoPilotModule (LightningModule pattern)."""
 
-from autopilot.core.module import AutoPilotModule, Module
+from autopilot.core.module.autopilot_module import AutoPilotModule
+from autopilot.core.module.module import Module
 from autopilot.core.parameter import Parameter
-from autopilot.core.types import Datum
+from autopilot.core.types import Datum, EvalDatum
 import pytest
 
 
 class _ChildModule(Module):
-  def forward(self, batch: object) -> Datum:
-    return Datum(success=True)
+  def forward(self, batch: object) -> EvalDatum:
+    return EvalDatum(success=True)
 
 
 class _ConcreteAutoPilot(AutoPilotModule):
-  def forward(self, batch: object) -> Datum:
-    return Datum(success=True, metrics={'ok': 1.0})
+  def forward(self, batch: object) -> EvalDatum:
+    return EvalDatum(success=True, metrics={'ok': 1.0})
 
-  def training_step(self, batch: object) -> Datum:
+  def training_step(self, batch: object, batch_idx: int) -> Datum:
     return self.forward(batch)
 
-  def validation_step(self, batch: object) -> Datum:
+  def validation_step(self, batch: object, batch_idx: int) -> Datum:
     return self.forward(batch)
 
-  def test_step(self, batch: object) -> Datum:
+  def test_step(self, batch: object, batch_idx: int) -> Datum:
     return self.forward(batch)
 
   def configure_optimizers(self) -> str:
@@ -36,7 +37,7 @@ class TestAutoPilotModuleInheritance:
   def test_forward_inherited_from_module(self) -> None:
     mod = _ConcreteAutoPilot()
     result = mod.forward(None)
-    assert isinstance(result, Datum)
+    assert isinstance(result, EvalDatum)
     assert result.success is True
 
   def test_children_and_parameters_inherited(self) -> None:
@@ -60,17 +61,17 @@ class TestAutoPilotModuleStepMethods:
   def test_training_step_raises_not_implemented(self) -> None:
     mod = AutoPilotModule()
     with pytest.raises(NotImplementedError):
-      mod.training_step(None)
+      mod.training_step(None, 0)
 
   def test_validation_step_raises_not_implemented(self) -> None:
     mod = AutoPilotModule()
     with pytest.raises(NotImplementedError):
-      mod.validation_step(None)
+      mod.validation_step(None, 0)
 
   def test_test_step_raises_not_implemented(self) -> None:
     mod = AutoPilotModule()
     with pytest.raises(NotImplementedError):
-      mod.test_step(None)
+      mod.test_step(None, 0)
 
   def test_configure_optimizers_raises_not_implemented(self) -> None:
     mod = AutoPilotModule()
@@ -79,17 +80,20 @@ class TestAutoPilotModuleStepMethods:
 
   def test_subclass_training_step(self) -> None:
     mod = _ConcreteAutoPilot()
-    result = mod.training_step(None)
+    result = mod.training_step(None, 0)
+    assert isinstance(result, EvalDatum)
     assert result.success is True
 
   def test_subclass_validation_step(self) -> None:
     mod = _ConcreteAutoPilot()
-    result = mod.validation_step(None)
+    result = mod.validation_step(None, 0)
+    assert isinstance(result, EvalDatum)
     assert result.success is True
 
   def test_subclass_test_step(self) -> None:
     mod = _ConcreteAutoPilot()
-    result = mod.test_step(None)
+    result = mod.test_step(None, 0)
+    assert isinstance(result, EvalDatum)
     assert result.success is True
 
   def test_subclass_configure_optimizers(self) -> None:
@@ -107,12 +111,12 @@ class TestAutoPilotModuleLifecycle:
     mod.on_validation_start()
     mod.on_validation_end()
 
-  def test_trainer_property_default_none(self) -> None:
+  def test_trainer_default_none(self) -> None:
     mod = AutoPilotModule()
     assert mod.trainer is None
 
-  def test_trainer_property_set_externally(self) -> None:
+  def test_trainer_set_externally(self) -> None:
     mod = AutoPilotModule()
     mock_trainer = object()
-    mod._trainer = mock_trainer
+    mod.trainer = mock_trainer
     assert mod.trainer is mock_trainer

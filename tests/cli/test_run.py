@@ -1,39 +1,40 @@
 """Tests for project resolution and CLI parser construction."""
 
-from autopilot.cli.context import _resolve_project
+from autopilot.cli.context import resolve_project
 from autopilot.cli.main import build_parser
+from autopilot.core.config import AutoPilotConfig
 from pathlib import Path
-import autopilot.core.paths as paths
 import pytest
 
 
 def _setup_project_dir(tmp_path: Path, name: str) -> None:
-  pdir = paths.projects_dir(tmp_path)
-  (pdir / name).mkdir(parents=True, exist_ok=True)
+  config = AutoPilotConfig(workspace=tmp_path)
+  (config.projects_path / name).mkdir(parents=True, exist_ok=True)
 
 
 class TestResolveProject:
   def test_explicit_flag_wins(self, tmp_path: Path) -> None:
-    result = _resolve_project(tmp_path, 'explicit')
+    result = resolve_project(tmp_path, 'explicit')
     assert result == 'explicit'
 
   def test_returns_none_when_no_project(self, tmp_path: Path) -> None:
-    result = _resolve_project(tmp_path, '')
+    result = resolve_project(tmp_path, '')
     assert result is None
 
   def test_explicit_over_cwd_detection(self, tmp_path: Path) -> None:
     _setup_project_dir(tmp_path, 'default-proj')
-    result = _resolve_project(tmp_path, 'explicit')
+    result = resolve_project(tmp_path, 'explicit')
     assert result == 'explicit'
 
   def test_detects_project_from_cwd_under_projects(
     self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
   ) -> None:
     _setup_project_dir(tmp_path, 'myproj')
-    proj_home = paths.projects_dir(tmp_path) / 'myproj'
+    config = AutoPilotConfig(workspace=tmp_path)
+    proj_home = config.projects_path / 'myproj'
     (proj_home / 'ai').mkdir(parents=True)
     monkeypatch.chdir(proj_home)
-    assert _resolve_project(tmp_path, '') == 'myproj'
+    assert resolve_project(tmp_path, '') == 'myproj'
 
 
 class TestBuildParser:

@@ -1,0 +1,10 @@
+id: no-registry-pattern
+language: Python
+severity: error
+message: "No registries or decorator-based registration. Components are Python objects, not string-key lookups (PHILOSOPHY.md)."
+rule:
+  kind: decorator
+  has:
+    kind: identifier
+    regex: "^register"
+    stopBy: end

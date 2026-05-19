@@ -1,0 +1,10 @@
+id: no-getattr-base-attrs
+language: Python
+severity: error
+message: "Do not use getattr() on base-class attributes. Access experiment.store / experiment.rollback directly."
+rule:
+  any:
+    - pattern: getattr($OBJ, 'store')
+    - pattern: getattr($OBJ, 'rollback')
+    - pattern: getattr($OBJ, 'store', $DEFAULT)
+    - pattern: getattr($OBJ, 'rollback', $DEFAULT)

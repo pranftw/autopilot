@@ -126,7 +126,7 @@ When writing skills for AutoPilot, follow these rules:
 - **2-space indentation** in all code examples
 - **Single quotes** for all Python strings
 - **No env vars** in any `src/autopilot/` code -- all config through function args
-- **Absolute imports only**: `from autopilot.core.models import Manifest`
+- **Absolute imports only**: `from autopilot.core.experiment import Experiment`
 - **No dynamic imports**: no `importlib`, no runtime discovery
 - **No registries**: components are wired as explicit objects (constructors, `Trainer`, `CLI`), not string-key lookups
 - Code examples should match the Google Python Style Guide baseline with the project overrides above

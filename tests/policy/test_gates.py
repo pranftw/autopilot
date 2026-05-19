@@ -10,7 +10,7 @@ class TestMinGate:
   def test_forward_passes_when_metric_gte_threshold(self) -> None:
     gate = MinGate('accuracy', 0.8)
     sc = Result(metrics={'accuracy': 0.85})
-    assert gate.forward(sc) == GateResult.PASS
+    assert gate.forward(sc) == GateResult.PASSED
 
   def test_forward_fails_when_metric_lt_threshold(self) -> None:
     gate = MinGate('accuracy', 0.8)
@@ -21,17 +21,18 @@ class TestMinGate:
     gate = MinGate('accuracy', 0.8)
     sc = Result(metrics={'accuracy': 0.85})
     text = gate.explain(sc)
+    assert 'MinGate' in text
     assert 'accuracy' in text
-    assert '0.850' in text or '0.85' in text
+    assert '0.85' in text
     assert '>=' in text
-    assert 'pass' in text
+    assert 'PASS' in text
 
 
 class TestMaxGate:
   def test_forward_passes_when_metric_lte_threshold(self) -> None:
     gate = MaxGate('loss', 1.0)
     sc = Result(metrics={'loss': 0.5})
-    assert gate.forward(sc) == GateResult.PASS
+    assert gate.forward(sc) == GateResult.PASSED
 
   def test_forward_fails_when_metric_gt_threshold(self) -> None:
     gate = MaxGate('loss', 1.0)
@@ -43,7 +44,7 @@ class TestRangeGate:
   def test_forward_passes_when_inside_range(self) -> None:
     gate = RangeGate('score', 0.0, 1.0)
     sc = Result(metrics={'score': 0.5})
-    assert gate.forward(sc) == GateResult.PASS
+    assert gate.forward(sc) == GateResult.PASSED
 
   def test_forward_fails_when_outside_range(self) -> None:
     gate = RangeGate('score', 0.2, 0.8)
@@ -57,7 +58,7 @@ class TestCustomGate:
   def test_forward_with_lambda(self) -> None:
     gate = CustomGate('loss', lambda v: v < 0.5)
     sc = Result(metrics={'loss': 0.3})
-    assert gate.forward(sc) == GateResult.PASS
+    assert gate.forward(sc) == GateResult.PASSED
     sc_fail = Result(metrics={'loss': 0.6})
     assert gate.forward(sc_fail) == GateResult.FAIL
 
@@ -93,7 +94,7 @@ class TestGateCallAndExplain:
   def test_gate_explain_returns_readable_string(self) -> None:
     class PassGate(Gate):
       def forward(self, result: Result) -> GateResult:
-        return GateResult.PASS
+        return GateResult.PASSED
 
     gate = PassGate('metric_a')
     sc = Result(metrics={})
@@ -116,6 +117,23 @@ class TestGateReprAndRequired:
     gate = MinGate('accuracy', 0.8, required=False)
     assert gate.required is False
     assert 'required=False' in repr(gate)
+
+
+class TestCustomGateTyped:
+  def test_custom_gate_fn_accepts_float_returns_bool(self) -> None:
+    gate = CustomGate('m', lambda v: v > 0.0)
+    result = Result(metrics={'m': 1.0})
+    assert gate.forward(result) == GateResult.PASSED
+
+  def test_custom_gate_fn_fails_when_false(self) -> None:
+    gate = CustomGate('m', lambda v: v > 10.0)
+    result = Result(metrics={'m': 1.0})
+    assert gate.forward(result) == GateResult.FAIL
+
+  def test_custom_gate_fn_missing_metric(self) -> None:
+    gate = CustomGate('m', lambda v: v > 0.0)
+    result = Result(metrics={'other': 1.0})
+    assert gate.forward(result) == GateResult.FAIL
 
 
 class TestBaseGate:

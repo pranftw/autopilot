@@ -1,0 +1,6 @@
+id: no-pytest-warns
+language: Python
+severity: error
+message: Do not use pytest.warns(). The framework does not emit warnings. Use pytest.raises() for error conditions.
+rule:
+  pattern: pytest.warns($$$ARGS)

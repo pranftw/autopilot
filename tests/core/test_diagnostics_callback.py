@@ -4,7 +4,16 @@ from autopilot.core.artifacts.artifact import JSONArtifact, JSONLArtifact
 from autopilot.core.callbacks.diagnostics import DiagnosticsCallback
 from autopilot.core.diagnostics import Diagnostics
 from autopilot.tracking.io import append_jsonl
+from typing import Any, cast
 from unittest.mock import MagicMock
+
+
+def _mock_trainer() -> MagicMock:
+  trainer = MagicMock()
+  trainer.experiment = None
+  trainer.tree = None
+  return trainer
+
 
 _heatmap = JSONArtifact('node_heatmap.json', scope='epoch')
 _diagnoses = JSONLArtifact('trace_diagnoses.jsonl', scope='epoch')
@@ -36,10 +45,9 @@ class TestDiagnosticsCallback:
       append_jsonl(data_path, item)
 
     cb = DiagnosticsCallback(Diagnostics(tmp_path))
-    cb.on_train_epoch_end(trainer=MagicMock(), epoch=1)
+    cb.on_train_epoch_end(trainer=_mock_trainer(), module=None, epoch=1)
 
-    heatmap = _heatmap.read_raw(tmp_path, epoch=1)
-    assert heatmap is not None
+    heatmap = cast(dict[str, Any], _heatmap.read_raw(tmp_path, epoch=1))
     assert heatmap['item_1']['total'] == 2
     assert heatmap['item_1']['failed'] == 0
     assert heatmap['item_2']['failed'] == 1
@@ -53,7 +61,7 @@ class TestDiagnosticsCallback:
 
   def test_empty_data_no_artifacts(self, tmp_path):
     cb = DiagnosticsCallback(Diagnostics(tmp_path))
-    cb.on_train_epoch_end(trainer=MagicMock(), epoch=1)
+    cb.on_train_epoch_end(trainer=_mock_trainer(), module=None, epoch=1)
 
     heatmap = _heatmap.read_raw(tmp_path, epoch=1)
     assert heatmap is None
@@ -65,9 +73,9 @@ class TestDiagnosticsCallback:
     append_jsonl(data_path, {'id': 'x', 'success': True, 'metadata': {}})
 
     cb = DiagnosticsCallback(Diagnostics(tmp_path))
-    cb.on_train_epoch_end(trainer=MagicMock(), epoch=1)
+    cb.on_train_epoch_end(trainer=_mock_trainer(), module=None, epoch=1)
 
-    heatmap = _heatmap.read_raw(tmp_path, epoch=1)
+    heatmap = cast(dict[str, Any], _heatmap.read_raw(tmp_path, epoch=1))
     assert heatmap['x']['failed'] == 0
 
     diagnoses = _diagnoses.read_raw(tmp_path, epoch=1)

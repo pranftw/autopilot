@@ -4,10 +4,10 @@ from autopilot.cli.commands.ai import (
   GenerateCommand,
   GenerateRun,
   JudgeRun,
-  _load_generator_config,
-  _load_judge_items,
-  _require_generator,
-  _require_judge,
+  load_generator_config,
+  load_judge_items,
+  require_generator,
+  require_judge,
 )
 from autopilot.cli.context import CLIContext
 from autopilot.cli.output import Output
@@ -71,42 +71,42 @@ class TestRequire:
   def test_raises_without_generator(self) -> None:
     ctx = _ctx(Path('/ws'))
     with pytest.raises(ValueError, match='no generator configured'):
-      _require_generator(ctx)
+      require_generator(ctx)
 
   def test_raises_without_judge(self) -> None:
     ctx = _ctx(Path('/ws'))
     with pytest.raises(ValueError, match='no judge configured'):
-      _require_judge(ctx)
+      require_judge(ctx)
 
   def test_passes_when_present(self) -> None:
     ctx = _ctx(Path('/ws'), generator=object())
-    _require_generator(ctx)
+    require_generator(ctx)
 
 
 class TestLoadGeneratorConfig:
   def test_loads_json_file(self, tmp_path: Path) -> None:
     config_path = _write_gen_config(tmp_path)
     args = _args()
-    config = _load_generator_config(str(config_path), args)
+    config = load_generator_config(str(config_path), args)
     assert config.dataset_id == 'test-ds'
     assert config.total_count == 10
 
   def test_applies_total_count_override(self, tmp_path: Path) -> None:
     config_path = _write_gen_config(tmp_path)
     args = _args(total_count=50)
-    config = _load_generator_config(str(config_path), args)
+    config = load_generator_config(str(config_path), args)
     assert config.total_count == 50
 
   def test_applies_seed_override(self, tmp_path: Path) -> None:
     config_path = _write_gen_config(tmp_path)
     args = _args(seed=99)
-    config = _load_generator_config(str(config_path), args)
+    config = load_generator_config(str(config_path), args)
     assert config.seed == 99
 
   def test_zero_means_no_override(self, tmp_path: Path) -> None:
     config_path = _write_gen_config(tmp_path)
     args = _args(total_count=0, seed=0)
-    config = _load_generator_config(str(config_path), args)
+    config = load_generator_config(str(config_path), args)
     assert config.total_count == 10
     assert config.seed == 42
 
@@ -120,9 +120,9 @@ class TestLoadJudgeItems:
       'custom': {},
     }
     items_path.write_text(json.dumps(item) + '\n', encoding='utf-8')
-    items = _load_judge_items(str(items_path))
+    items = load_judge_items(str(items_path))
     assert len(items) == 1
-    assert items[0].id == 'item-1'
+    assert items[0].item_id == 'item-1'
 
   def test_skips_blank_lines(self, tmp_path: Path) -> None:
     items_path = tmp_path / 'items.jsonl'
@@ -135,8 +135,36 @@ class TestLoadJudgeItems:
       json.dumps(item) + '\n\n' + json.dumps(item) + '\n',
       encoding='utf-8',
     )
-    items = _load_judge_items(str(items_path))
+    items = load_judge_items(str(items_path))
     assert len(items) == 2
+
+  def test_skips_interleaved_blank_lines_and_trailing_newline(self, tmp_path: Path) -> None:
+    items_path = tmp_path / 'items.jsonl'
+    item = {
+      'id': 'item-2',
+      'turns': [{'role': 'user', 'content': 'hi'}],
+      'custom': {},
+    }
+    items_path.write_text(
+      '\n' + json.dumps(item) + '\n  \n' + json.dumps(item) + '\n\n',
+      encoding='utf-8',
+    )
+    items = load_judge_items(str(items_path))
+    assert len(items) == 2
+    assert items[0].item_id == 'item-2'
+
+  def test_utf8_content(self, tmp_path: Path) -> None:
+    items_path = tmp_path / 'items.jsonl'
+    item = {
+      'id': 'item-utf8',
+      'turns': [{'role': 'user', 'content': 'caf\u00e9 \u00fcber'}],
+      'custom': {},
+    }
+    items_path.write_text(json.dumps(item, ensure_ascii=False) + '\n', encoding='utf-8')
+    items = load_judge_items(str(items_path))
+    assert len(items) == 1
+    assert items[0].item_id == 'item-utf8'
+    assert 'caf\u00e9' in items[0].turns[0].content
 
 
 class TestHandleGenerateRun:

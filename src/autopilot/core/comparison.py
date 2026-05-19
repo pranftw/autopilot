@@ -1,136 +1,246 @@
 """Metric comparison utilities.
 
-Pure functions for metric comparison, plus the canonical typed reader.
-Data models: MetricComparison, EpochMetrics.
+Delta captures a per-metric comparison result. MetricsComparator orchestrates
+comparisons across multiple metrics using Metric definitions for semantics.
+Reads higher_is_better from each Metric to know direction. Significance is
+checked via threshold_abs / threshold_pct -- no Comparison strategy class
+hierarchy needed.
 """
 
-from autopilot.core.artifacts.epoch import MetricComparisonArtifact
+from autopilot.core.metric import Metric, MetricCollection
 from autopilot.core.serialization import DictMixin
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
+from collections.abc import Sequence
+from dataclasses import dataclass
+from operator import itemgetter
+from typing import Any, cast
 
 
 @dataclass
-class EpochMetrics(DictMixin):
-  """Structured forward pass result per epoch."""
+class Delta(DictMixin):
+  """Per-metric comparison result. Data only -- no judgment.
 
-  epoch: int = 0
-  split: str | None = None
-  total: int = 0
-  passed: int = 0
-  failed: int = 0
-  accuracy: float = 0.0
-  error_rate: float = 0.0
-  latency_p95_ms: float = 0.0
-  delta: dict[str, float] = field(default_factory=dict)
-  gates: dict[str, str] = field(default_factory=dict)
-  data_path: str | None = None
+  Attributes:
+    metric: Metric key compared (registered name on the comparator).
+    baseline: Baseline (reference) metric value.
+    candidate: Candidate metric value (field name is ``candidate``, not
+      ``current``).
+    delta: Candidate minus baseline.
+    higher_is_better: Direction flag from the metric definition; None when
+      unknown.
+    significant: Whether the change exceeds configured significance thresholds.
+  """
 
-
-@dataclass
-class MetricComparison(DictMixin):
-  """Result of compare_metrics(). Booleans computed from lists, not magic strings."""
-
-  epoch: int = 0
-  per_metric_deltas: dict[str, float] = field(default_factory=dict)
-  regressions: list[dict] = field(default_factory=list)
-  improvements: list[dict] = field(default_factory=list)
-
-  @property
-  def regression_detected(self) -> bool:
-    return bool(self.regressions) and not bool(self.improvements)
-
-  @property
-  def improvement_detected(self) -> bool:
-    return bool(self.improvements) and not bool(self.regressions)
-
-  @property
-  def is_mixed(self) -> bool:
-    return bool(self.regressions) and bool(self.improvements)
-
-  @property
-  def candidate_metrics(self) -> dict[str, float]:
-    """Extract per-metric candidate values from comparison rows."""
-    metrics: dict[str, float] = {}
-    for row in [*self.regressions, *self.improvements]:
-      if 'candidate' in row:
-        metrics[row['metric']] = row['candidate']
-    return metrics
-
-  def to_dict(self) -> dict[str, Any]:
-    d = super().to_dict()
-    d['regression_detected'] = self.regression_detected
-    d['improvement_detected'] = self.improvement_detected
-    d['is_mixed'] = self.is_mixed
-    return d
+  metric: str
+  baseline: float
+  candidate: float
+  delta: float
+  higher_is_better: bool | None
+  significant: bool
 
 
-def _higher_is_better(metric: str, metric_metadata: dict[str, bool] | None) -> bool:
-  if metric_metadata and metric in metric_metadata:
-    return metric_metadata[metric]
-  return True
+class ComparatorMetric:
+  """Lightweight metric wrapper for MetricsComparator consumption.
+
+  Unlike full Metric subclasses, this only carries ``metric_name`` and
+  ``higher_is_better`` direction for comparison purposes.
+  """
+
+  def __init__(self, metric_name: str, higher_is_better: bool | None) -> None:
+    """Create a comparison-only metric descriptor.
+
+    Args:
+      metric_name: Identifier used as the key in metric dicts.
+      higher_is_better: Direction flag; ``None`` when direction is unknown.
+    """
+    self.metric_name = metric_name
+    self.higher_is_better = higher_is_better
+
+  def name(self) -> str:
+    """Return the metric name for MetricsComparator keying.
+
+    Returns:
+      The ``metric_name`` this instance was constructed with.
+    """
+    return self.metric_name
 
 
-def _is_significant_change(
-  delta: float,
-  base_val: float,
-  threshold_abs: float,
-  threshold_pct: float,
-) -> bool:
-  if threshold_abs == 0.0 and threshold_pct == 0.0:
-    return delta != 0.0
-  sig_abs = threshold_abs > 0.0 and abs(delta) > threshold_abs
-  sig_pct = threshold_pct > 0.0 and base_val != 0.0 and abs(delta) / abs(base_val) > threshold_pct
-  return sig_abs or sig_pct
+class MetricsComparator:
+  """Compare experiment metrics using Metric definitions for semantics.
 
+  Baseline and candidate dict keys must match the names this comparator
+  registers: for a list[Metric] argument, each key is metric.name()
+  (default: class name, e.g. 'AccuracyMetric'). For a MetricCollection
+  argument, keys are the collection's child attribute names (as returned
+  by named_children()), which may differ from class names when metrics
+  are stored under custom attribute keys. Mismatched keys silently
+  produce no comparison.
 
-def compare_metrics(
-  baseline: dict[str, float],
-  candidate: dict[str, float],
-  threshold_abs: float = 0.0,
-  threshold_pct: float = 0.0,
-  metric_metadata: dict[str, bool] | None = None,
-) -> MetricComparison:
-  """Compare two metric dicts. Returns MetricComparison with computed boolean properties."""
-  per_metric_deltas: dict[str, float] = {}
-  regressions: list[dict] = []
-  improvements: list[dict] = []
+  Reads higher_is_better from each Metric to know direction.
+  Significance is checked via threshold_abs / threshold_pct.
+  All comparison logic is here -- Metric stays clean (update/compute only).
+  """
 
-  common_keys = set(baseline.keys()) & set(candidate.keys())
-  for key in sorted(common_keys):
-    base_val = baseline[key]
-    cand_val = candidate[key]
-    delta = cand_val - base_val
-    per_metric_deltas[key] = delta
+  def __init__(
+    self,
+    metrics: MetricCollection | Sequence[Metric | ComparatorMetric],
+    threshold_abs: float = 0.0,
+    threshold_pct: float = 0.0,
+  ) -> None:
+    """Create a comparator from metrics and significance thresholds.
 
-    higher = _higher_is_better(key, metric_metadata)
-    significant = _is_significant_change(delta, base_val, threshold_abs, threshold_pct)
+    Args:
+      metrics: Metric collection or sequence of objects with ``name()`` and
+        ``higher_is_better``; keys derive from collection child names or
+        each metric's ``name()``.
+      threshold_abs: Absolute delta threshold for significance.
+      threshold_pct: Relative delta threshold as a fraction of baseline magnitude.
 
-    if higher:
-      is_reg = delta < 0.0 and significant
-      is_imp = delta > 0.0 and significant
+    Raises:
+      ValueError: When a sequence contains two metrics with the same name.
+    """
+    if isinstance(metrics, MetricCollection):
+      self._metrics: dict[str, Metric | ComparatorMetric] = cast(
+        Any, dict(metrics.named_children())
+      )
     else:
-      is_reg = delta > 0.0 and significant
-      is_imp = delta < 0.0 and significant
+      names_seen: dict[str, Metric | ComparatorMetric] = {}
+      for m in metrics:
+        name = m.name()
+        if name in names_seen:
+          msg = f'duplicate metric: {name}'
+          raise ValueError(msg)
+        names_seen[name] = m
+      self._metrics = names_seen
+    self._threshold_abs = threshold_abs
+    self._threshold_pct = threshold_pct
 
-    row = {'metric': key, 'delta': delta, 'baseline': base_val, 'candidate': cand_val}
-    if is_reg:
-      regressions.append(row)
-    elif is_imp:
-      improvements.append(row)
+  def compare(
+    self,
+    baseline: dict[str, float],
+    candidate: dict[str, float],
+  ) -> list[Delta]:
+    """Compare two metric dicts.
 
-  return MetricComparison(
-    epoch=0,
-    per_metric_deltas=per_metric_deltas,
-    regressions=regressions,
-    improvements=improvements,
-  )
+    Args:
+      baseline: Reference metrics keyed by registered metric names.
+      candidate: Candidate metrics keyed by registered metric names.
 
+    Returns:
+      One Delta per metric present in both dicts and registered on this comparator.
+    """
+    deltas = []
+    for name, metric in self._metrics.items():
+      if name in baseline and name in candidate:
+        base_val = baseline[name]
+        cand_val = candidate[name]
+        d = cand_val - base_val
+        deltas.append(
+          Delta(
+            metric=name,
+            baseline=base_val,
+            candidate=cand_val,
+            delta=d,
+            higher_is_better=metric.higher_is_better,
+            significant=self.is_significant(d, base_val),
+          )
+        )
+    return deltas
 
-def load_metric_comparison(experiment_dir: Path, epoch: int) -> MetricComparison | None:
-  """Read and deserialize metric_comparison.json for an epoch."""
-  raw = MetricComparisonArtifact().read_raw(experiment_dir, epoch=epoch)
-  if raw is None:
-    return None
-  return MetricComparison.from_dict(raw)
+  def is_improvement(self, delta: Delta) -> bool:
+    """Whether the delta moves in the favorable direction for the metric.
+
+    Args:
+      delta: Comparison record including delta and higher_is_better.
+
+    Returns:
+      True if candidate improved vs baseline given directionality.
+
+    Raises:
+      ValueError: When higher_is_better is unset on the delta.
+    """
+    if delta.higher_is_better is None:
+      msg = f'higher_is_better not set for {delta.metric}'
+      raise ValueError(msg)
+    if delta.higher_is_better:
+      return delta.delta > 0
+    return delta.delta < 0
+
+  def best_index(
+    self,
+    results: list[dict[str, float]],
+    metric: str,
+  ) -> int:
+    """Index of the best result for a given metric name.
+
+    On ties, returns the first occurrence (lowest index).
+    Skips result dicts missing the metric key.
+
+    Args:
+      results: List of per-run metric dicts.
+      metric: Registered metric name to optimize.
+
+    Returns:
+      Index into results of the best value for metric.
+
+    Raises:
+      ValueError: When results is empty, higher_is_better is unset for the
+        metric, or no dict in results contains the metric.
+    """
+    if not results:
+      msg = f'best_index: results list is empty (metric={metric!r})'
+      raise ValueError(
+        msg,
+      )
+    metric_spec = self._metrics[metric]
+    if metric_spec.higher_is_better is None:
+      msg = (
+        f'higher_is_better not set for metric {metric!r} '
+        f'(mode must be set on Metric before best_index)'
+      )
+      raise ValueError(
+        msg,
+      )
+    indices_and_values: list[tuple[int, float]] = []
+    for i, r in enumerate(results):
+      if metric not in r:
+        continue
+      indices_and_values.append((i, r[metric]))
+    if not indices_and_values:
+      all_keys: set[str] = set()
+      for r in results:
+        all_keys.update(r)
+      union_keys = sorted(all_keys)
+      msg = (
+        f'best_index: no result dicts contain metric {metric!r}; '
+        f'keys_present_across_results={union_keys!r}'
+      )
+      raise ValueError(
+        msg,
+      )
+    if metric_spec.higher_is_better:
+      return max(indices_and_values, key=itemgetter(1))[0]
+    return min(indices_and_values, key=itemgetter(1))[0]
+
+  def is_significant(self, delta: float, baseline: float) -> bool:
+    """Check if a delta is significant given thresholds.
+
+    Public method per CLAUDE.md: all customization hooks are public.
+    Users may override for custom significance logic in subclasses.
+
+    Args:
+      delta: Candidate minus baseline for one metric.
+      baseline: Baseline magnitude; used for relative threshold when non-zero.
+
+    Returns:
+      True if the change exceeds configured absolute or percentage thresholds
+      (or any non-zero delta when both thresholds are zero).
+    """
+    if self._threshold_abs == 0.0 and self._threshold_pct == 0.0:
+      return delta != 0.0
+    abs_sig = self._threshold_abs > 0.0 and abs(delta) > self._threshold_abs
+    pct_sig = (
+      self._threshold_pct > 0.0
+      and baseline != 0.0
+      and abs(delta) / abs(baseline) > self._threshold_pct
+    )
+    return abs_sig or pct_sig

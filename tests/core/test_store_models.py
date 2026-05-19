@@ -1,48 +1,120 @@
 """Tests for Store ABC and supporting dataclasses."""
 
-from autopilot.core.store import (
+from autopilot.core.snapshot import FileEntry, SnapshotManifest
+from autopilot.core.store.base import Store
+from autopilot.core.store.types import (
+  ConflictEntry,
   DiffEntry,
   DiffResult,
-  FileEntry,
-  MergeResult,
+  MergeAnalysisResult,
+  MergeClassification,
+  MergeIndex,
+  MergeStrategy,
   SnapshotEntry,
-  SnapshotManifest,
   StatusEntry,
   StatusResult,
-  Store,
 )
+from typing import Any, cast
 import pytest
 
 
 class TestStoreABC:
   def test_store_cannot_be_instantiated(self) -> None:
     with pytest.raises(NotImplementedError):
-      Store(path=None, slug='test', parameters=[])
+      Store(cast(Any, None))
 
   def test_store_is_a_class(self) -> None:
     assert isinstance(Store, type)
 
+  def test_new_methods_raise_not_implemented(self) -> None:
+    """All new methods on Store base raise NotImplementedError."""
+
+    class MinimalStore(Store):
+      def __init__(self):
+        pass
+
+    s = MinimalStore()
+    with pytest.raises(NotImplementedError):
+      s.snapshot('exp', 0)
+    with pytest.raises(NotImplementedError):
+      s.checkout('exp', 0)
+    with pytest.raises(NotImplementedError):
+      s.diff('exp', 0, 1)
+    with pytest.raises(NotImplementedError):
+      s.branch('exp')
+    with pytest.raises(NotImplementedError):
+      s.merge_analysis('exp', 'other')
+    with pytest.raises(NotImplementedError):
+      s.merge_preview('exp', 'other')
+    with pytest.raises(NotImplementedError):
+      s.merge_apply(MergeIndex())
+    with pytest.raises(NotImplementedError):
+      s.log('exp')
+    with pytest.raises(NotImplementedError):
+      s.status('exp')
+    with pytest.raises(NotImplementedError):
+      s.materialize('exp', 0)
+    with pytest.raises(NotImplementedError):
+      s.create_worktree('exp')
+    with pytest.raises(NotImplementedError):
+      s.remove_worktree('exp')
+    with pytest.raises(NotImplementedError):
+      s.list_worktrees()
+    with pytest.raises(NotImplementedError):
+      s.resolve_path('exp')
+    with pytest.raises(NotImplementedError):
+      s.save_state_dict({})
+    with pytest.raises(NotImplementedError):
+      s.load_state_dict()
+    with pytest.raises(NotImplementedError):
+      _ = s.config
+
+  def test_method_signatures_accept_experiment_id(self) -> None:
+    """Verify method signatures include experiment_id parameter."""
+
+    class MinimalStore(Store):
+      def __init__(self):
+        pass
+
+    s = MinimalStore()
+    import inspect
+
+    sig = inspect.signature(s.snapshot)
+    params = list(sig.parameters.keys())
+    assert 'experiment_id' in params
+    assert 'epoch' in params
+
+    sig = inspect.signature(s.checkout)
+    params = list(sig.parameters.keys())
+    assert 'experiment_id' in params
+    assert 'epoch' in params
+
+    sig = inspect.signature(s.resolve_path)
+    params = list(sig.parameters.keys())
+    assert 'experiment_id' in params
+    assert 'epoch' in params
+
 
 class TestFileEntry:
   def test_construction(self) -> None:
-    e = FileEntry(hash='abc123', size=1024, mtime=1700000000.0)
-    assert e.hash == 'abc123'
+    e = FileEntry(digest='abc123', size=1024, mtime=1700000000.0)
+    assert e.digest == 'abc123'
     assert e.size == 1024
     assert e.mtime == 1700000000.0
 
   def test_to_dict(self) -> None:
-    e = FileEntry(hash='abc', size=10, mtime=1.0)
+    e = FileEntry(digest='abc', size=10, mtime=1.0)
     d = e.to_dict()
-    assert d == {'hash': 'abc', 'size': 10, 'mtime': 1.0}
+    assert d == {'digest': 'abc', 'size': 10, 'mtime': 1.0, 'original_path': None}
 
   def test_from_dict(self) -> None:
-    d = {'hash': 'abc', 'size': 10, 'mtime': 1.0}
+    d = {'digest': 'abc', 'size': 10, 'mtime': 1.0}
     e = FileEntry.from_dict(d)
-    assert e.hash == 'abc'
+    assert e.digest == 'abc'
     assert e.size == 10
 
   def test_round_trip(self) -> None:
-    e = FileEntry(hash='sha256hex', size=2048, mtime=1700000001.5)
+    e = FileEntry(digest='sha256hex', size=2048, mtime=1700000001.5)
     e2 = FileEntry.from_dict(e.to_dict())
     assert e == e2
 
@@ -55,27 +127,32 @@ class TestSnapshotManifest:
 
   def test_construction_with_entries(self) -> None:
     entries = {
-      'prompts::system.md': FileEntry(hash='aaa', size=100, mtime=1.0),
-      'config::main.tf': FileEntry(hash='bbb', size=200, mtime=2.0),
+      'prompts::system.md': FileEntry(digest='aaa', size=100, mtime=1.0),
+      'config::main.tf': FileEntry(digest='bbb', size=200, mtime=2.0),
     }
     s = SnapshotManifest(epoch=1, timestamp='2025-01-01T00:00:00Z', entries=entries)
     assert len(s.entries) == 2
-    assert s.entries['prompts::system.md'].hash == 'aaa'
+    assert s.entries['prompts::system.md'].digest == 'aaa'
 
   def test_to_dict(self) -> None:
     s = SnapshotManifest(
       epoch=0,
       timestamp='ts',
-      entries={'a::b.txt': FileEntry(hash='h', size=1, mtime=0.0)},
+      entries={'a::b.txt': FileEntry(digest='h', size=1, mtime=0.0)},
     )
     d = s.to_dict()
     assert d['epoch'] == 0
-    assert d['entries']['a::b.txt'] == {'hash': 'h', 'size': 1, 'mtime': 0.0}
+    assert d['entries']['a::b.txt'] == {
+      'digest': 'h',
+      'size': 1,
+      'mtime': 0.0,
+      'original_path': None,
+    }
 
   def test_round_trip(self) -> None:
     entries = {
-      'p1::file.py': FileEntry(hash='abc123', size=512, mtime=1700000000.0),
-      'p2::data.json': FileEntry(hash='def456', size=1024, mtime=1700000001.0),
+      'p1::file.py': FileEntry(digest='abc123', size=512, mtime=1700000000.0),
+      'p2::data.json': FileEntry(digest='def456', size=1024, mtime=1700000001.0),
     }
     s = SnapshotManifest(epoch=3, timestamp='2025-06-15T12:00:00Z', entries=entries)
     s2 = SnapshotManifest.from_dict(s.to_dict())
@@ -94,6 +171,7 @@ class TestDiffEntry:
     e = DiffEntry(
       path='p::f.txt', status='modified', old_hash='aaa', new_hash='bbb', text_diff='--- a\n+++ b'
     )
+    assert e.text_diff is not None
     assert e.text_diff.startswith('---')
 
   def test_deleted(self) -> None:
@@ -137,35 +215,78 @@ class TestDiffResult:
     assert r2.entries[1].status == 'deleted'
 
 
-class TestMergeResult:
-  def test_clean_merge(self) -> None:
-    snap = SnapshotManifest(epoch=2, timestamp='ts', entries={})
-    r = MergeResult(merged=True, merged_snapshot=snap)
-    assert r.merged is True
-    assert r.conflicts == []
+class TestMergeStrategy:
+  def test_members(self) -> None:
+    assert MergeStrategy.normal.value == 'normal'
+    assert MergeStrategy.ours.value == 'ours'
+    assert MergeStrategy.theirs.value == 'theirs'
+    assert MergeStrategy.union.value == 'union'
 
-  def test_conflicted_merge(self) -> None:
-    r = MergeResult(merged=False, conflicts=['p::f.txt', 'p::g.txt'])
-    assert r.merged is False
-    assert len(r.conflicts) == 2
 
-  def test_round_trip_with_snapshot(self) -> None:
-    snap = SnapshotManifest(
-      epoch=1,
-      timestamp='ts',
-      entries={'k': FileEntry(hash='h', size=1, mtime=0.0)},
+class TestConflictEntry:
+  def test_construction(self) -> None:
+    entry = ConflictEntry(
+      key='prompts/system.txt',
+      ours=FileEntry(digest='aaa', size=10, mtime=0.0),
     )
-    r = MergeResult(merged=True, conflicts=[], merged_snapshot=snap)
-    r2 = MergeResult.from_dict(r.to_dict())
-    assert r2.merged is True
-    assert r2.merged_snapshot is not None
-    assert r2.merged_snapshot.entries['k'].hash == 'h'
+    assert entry.key == 'prompts/system.txt'
+    assert entry.ancestor is None
+    assert entry.theirs is None
 
-  def test_round_trip_without_snapshot(self) -> None:
-    r = MergeResult(merged=False, conflicts=['a'])
-    r2 = MergeResult.from_dict(r.to_dict())
-    assert r2.merged is False
-    assert r2.merged_snapshot is None
+  def test_round_trip(self) -> None:
+    entry = ConflictEntry(
+      key='k',
+      ancestor=FileEntry(digest='a', size=1, mtime=0.0),
+      ours=FileEntry(digest='b', size=2, mtime=0.0),
+      theirs=FileEntry(digest='c', size=3, mtime=0.0),
+    )
+    data = entry.to_dict()
+    entry2 = ConflictEntry.from_dict(data)
+    assert entry2.key == 'k'
+    assert entry2.ancestor is not None
+    assert entry2.ancestor.digest == 'a'
+    assert entry2.ours is not None
+    assert entry2.ours.digest == 'b'
+    assert entry2.theirs is not None
+    assert entry2.theirs.digest == 'c'
+
+
+class TestMergeAnalysisResult:
+  def test_construction(self) -> None:
+    result = MergeAnalysisResult(
+      can_fast_forward=True,
+      has_conflicts=False,
+      conflict_count=0,
+      classification=MergeClassification.fast_forward,
+    )
+    assert result.can_fast_forward is True
+    assert result.classification == 'fast_forward'
+
+  def test_round_trip(self) -> None:
+    result = MergeAnalysisResult(
+      can_fast_forward=False,
+      has_conflicts=True,
+      conflict_count=3,
+      ancestor_epoch=2,
+      classification=MergeClassification.conflict,
+    )
+    data = result.to_dict()
+    result2 = MergeAnalysisResult.from_dict(data)
+    assert result2.has_conflicts is True
+    assert result2.conflict_count == 3
+    assert result2.ancestor_epoch == 2
+
+
+class TestMergeIndex:
+  def test_is_resolved_empty(self) -> None:
+    idx = MergeIndex()
+    assert idx.is_resolved() is True
+
+  def test_is_resolved_with_conflicts(self) -> None:
+    idx = MergeIndex(
+      conflicts={'k': ConflictEntry(key='k')},
+    )
+    assert idx.is_resolved() is False
 
 
 class TestStatusEntry:

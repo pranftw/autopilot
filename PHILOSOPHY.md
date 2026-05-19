@@ -36,16 +36,17 @@ Not automating at the start allows us to reach better automation faster.
 ### Principle: isinstance on core classes only
 
 `isinstance` checks against core framework classes (`Parameter`, `Module`,
-`AutoPilotModule`, `Gradient`, `Datum`) are fine -- that's how PyTorch
-works (`isinstance(value, Parameter)` in `Module.__setattr__`,
-`isinstance(param, Tensor)` in `Optimizer`). What's banned is `isinstance`
-against concrete leaf types (`PathParameter`, `TextGradient`,
-`ClaudeCodeAgent`). These break extensibility because a new subclass won't
-be recognized. Instead, base classes expose methods that subclasses
-override -- `Parameter.render()`, `Parameter.snapshot()`,
-`Gradient.render()`, `Gradient.accumulate()`. Adding a new Parameter,
-Gradient, or Loss subclass requires zero framework changes. Built-in
-concrete types exist for DRY, not for special-casing.
+`AutoPilotModule`, `Gradient`, `Datum`, `Experiment`, `Metric`) are fine --
+that's how PyTorch works (`isinstance(value, Parameter)` in
+`Module.__setattr__`, `isinstance(param, Tensor)` in `Optimizer`). What's
+banned is `isinstance` against concrete leaf types (`PathParameter`,
+`TextGradient`, `ClaudeCodeAgent`). These break extensibility because a new
+subclass won't be recognized. Instead, base classes expose methods that
+subclasses override -- `Parameter.render()`, `Parameter.snapshot()`,
+`Gradient.render()`, `Gradient.accumulate()`, `Experiment.start()`,
+`Experiment.complete()`. Adding a new Parameter, Gradient, Experiment, or
+Loss subclass requires zero framework changes. Built-in concrete types
+exist for DRY, not for special-casing.
 
 ### Principle: Store decoupled from parameter types
 
@@ -80,16 +81,20 @@ The optimization loop skeleton -- Loop.run, step methods, callbacks, policy
 gates -- is deterministic code. At epoch boundaries, `optimizer.step()` applies
 changes. The code decides WHEN things happen; the agent decides WHAT to change.
 Like PyTorch: the training loop controls flow, `model(x)` computes output,
-`optimizer.step()` updates weights.
+`optimizer.step()` updates weights. Backward hooks are observation-only
+(they cannot modify gradients) to keep the loop deterministic.
 
 ### Principle 5: Progressive disclosure
 
 Three layers, each building on the one below:
 
 - **Core**: maximum control. Use modules, policies, metrics directly.
-  Write your own loop.
+  Write your own loop. `Scheduler`, `param_groups`, `register_buffer`,
+  `ScalarParameter`, and `Module.zero_grad` are all usable standalone
+  without Trainer.
 - **Trainer**: convenience. Constructor injection, automated orchestration,
-  callbacks for cross-cutting concerns.
+  callbacks for cross-cutting concerns. Wires schedulers, runs
+  `validate()`/`test()`/`predict()` standalone, dispatches sanity checks.
 - **Optimizer + Agent**: intelligent automation. LLM-backed optimization within
   the code-driven loop. `AgentOptimizer` composes an `Agent` with context;
   `JudgeLoss` bridges judge feedback into typed gradients. Deterministic
@@ -104,12 +109,35 @@ that impose structure from outside.
 
 ### Principle 7: Agent-friendly data surface
 
-All tracking state -- manifests, events, metric records, traces, experiment
-histories -- is stored in agent-friendly MD and JSON files. The framework
-writes this data deterministically; the agent reads and reasons over it.
+All tracking state -- experiment trees (Forest/Tree), logger events, metric
+records, traces, execution histories, context logs -- is stored in
+agent-friendly JSON files. The framework writes this data deterministically;
+the agent reads and reasons over it. `Experiment.state_dict()` captures
+lifecycle state; `Logger` records metrics, hyperparams, and events;
+`CheckpointIO` persists training checkpoints for resumption; `ContextLog`
+provides a structured, append-only decision journal per experiment.
+Store reflog (JSONL), tags (JSON in refs.json), and stash (JSON manifests)
+are all agent-readable structured data with timestamps via `utc_now_iso()`.
 This gives the agent total visibility into everything: approaches explored,
 experiments performed, decisions backed by evidence. Orchestration is code,
 data is agent-readable files.
+
+Temporal queryability: all timestamped records (context entries, execution
+records) use `parse_timestamp()` for proper `datetime` comparison.
+Time-range filters (`after()`, `between()`) operate on parsed datetime
+objects, never raw ISO string comparison.
+
+### Principle 8: Decisions backed by evidence
+
+Every mutating action -- CLI command, optimizer step, policy gate decision,
+rollback -- must carry an explicit reason. The `--context` flag on CLI
+commands is mandatory for mutations; internal components emit reasons
+automatically through `Trainer.emit_context()`. All mutating store
+operations (snapshot, checkout, tag, stash, merge, copy-epoch) append
+reflog entries with context. This produces a complete decision journal:
+not just what happened (metrics), but why it happened (context entries
+with source, epoch, and metadata). Agents reconstructing history can
+always answer "why was this done?" by reading the context log or reflog.
 
 ## Three Layers
 
@@ -124,25 +152,30 @@ The PyTorch-style layer. Everything is explicit:
     metric.update(data)                        # Metric tracks state
     result = compute_result(observation, gates) # Result with gates
 
+Core also includes Tree/Forest/QueryBuilder/MetricsComparator for
+experiment tracking and comparison. Experiment is a pure data entity
+with lifecycle methods. Config handles all path computation.
+
 No Trainer, no callbacks, no indirection. Maximum control. Use this when
 you need to understand exactly what's happening or build something the
 Trainer doesn't support yet.
 
 ### Trainer layer
 
-The Lightning-style layer. Composes core components:
+The Lightning-style layer. Composes core components and integrates with
+the experiment lifecycle (both tiers):
 
-    trainer = Trainer(callbacks=[...], policy=my_policy, experiment=my_experiment)
-    trainer.fit(
-      module,
-      train_dataloaders=train_loader,
-      val_dataloaders=val_loader,
-      max_epochs=10,
+    trainer = Trainer(
+      config=config, forest=forest, tree=tree, experiment=my_experiment,
+      callbacks=[...], policy=my_policy,
     )
+    trainer.fit(module, train_dataloaders=train_loader, max_epochs=10)
 
 Constructor injection -- all components are passed as objects, not looked up
 by string key. Callback system for cross-cutting concerns. Automated
-orchestration for the optimization loop.
+orchestration for the optimization loop. Optional config kwarg coordinates
+Store and Environment. Tree/Forest are Trainer kwargs. Experiment is base
+(manual control) or AutoPilotExperiment (hooks).
 
 ### Optimizer + Agent layer
 
@@ -151,7 +184,7 @@ within the code-driven loop:
 
     from autopilot.ai.gradient import ConcatCollator
     from autopilot.ai.loss import JudgeLoss
-    from autopilot.core.module import Module
+    from autopilot.core.module.module import Module
 
 
     class MyModule(Module):
@@ -233,6 +266,17 @@ To add an eval generator: subclass `DataGenerator`, override
 To add a judge: subclass `Judge`, override `define_steps()`,
 `assemble_result()`, `build_summary()`.
 
+To customize experiment tracking: subclass `Node`, `Experiment`, or
+`AutoPilotExperiment`. Two tiers: base Experiment for manual control,
+AutoPilotExperiment for Trainer-integrated hooks.
+
+To customize execution isolation: subclass `Environment`. `LocalEnvironment`
+runs in the current directory; `IsolatedEnvironment` provides worktree-based
+isolation with symlinks for non-parameters and copies for parameters.
+
+To customize path layout: subclass `Config`. Config handles all path
+computation. Environment injection is via `Config(..., environment=...)`.
+
 No registration. No config files required. Pure Python objects.
 
 > Everything is Module (like `nn.Module`), with additional abstractions:
@@ -295,14 +339,19 @@ classes:
   implementations. `MinGate`, `MaxGate`, `RangeGate`, `CustomGate` are built-in gates.
 - `ConcatCollator` and `AgentCollator` are built-in gradient collators. Users
   subclass `GradientCollator` for custom collation logic.
-- `CheckpointIO` (`ai/checkpoints.py`) provides a default append-only JSONL
-  backend for generator/judge runs. `JSONCheckpoint` (`core/checkpoint.py`)
-  handles experiment manifest persistence. Like Lightning's `CheckpointIO`.
+- `CheckpointIO` (`core/checkpoint.py`) is the training checkpoint storage backend;
+  `JSONCheckpointIO` is the built-in JSON persistence. `Trainer.save_checkpoint`
+  assembles full state; `fit(ckpt_path=...)` resumes. `CheckpointCallback` saves
+  per epoch. `StoreCheckpointCallback` is separate (parameter versioning via
+  `Store.snapshot`). The `ai.evaluation.checkpoints.CheckpointIO` is unrelated
+  (eval JSONL progress).
 - `Checkpointable` protocol: anything with `state_dict()`/`load_state_dict()` can
   be persisted through checkpoints. Like PyTorch's Module state dict pattern.
 - `JudgeLoss`, `AgentOptimizer`, `PathParameter`, `FileStore`, `StoreCheckpointCallback`,
-  `StorePromoterCallback`, `ClaudeCodeAgent` are built-in implementations for the
-  agent-driven optimization loop.
+  `ClaudeCodeAgent` are built-in implementations for the agent-driven optimization loop.
+- `Environment`, `LocalEnvironment` (core), `IsolatedEnvironment` (ai) are builtins
+  for execution isolation. `FileForest`, `AutoPilotExperiment`, `MetricsComparator`
+  are builtins for experiment tracking.
 
 ## Step-Based Workflows
 
@@ -338,6 +387,22 @@ Clear separation between what lives in the base library vs project overlays:
 
 The test: "Would this exist in a translation eval? A RAG eval?" If yes, it belongs
 in base. If it's project-specific, it belongs in the overlay.
+
+## Intentional Non-Implementations
+
+Features explicitly not implemented, with rationale:
+
+| Feature | Rationale |
+|---------|-----------|
+| Gradient clipping | Non-differentiable domain has no numeric gradients to clip |
+| `module.log()` / `log_dict()` | Metrics flow via stateful `Metric` objects, not per-call logging |
+| GPU/CUDA profiling | GPU/CUDA profiling is not relevant. Wall-clock profiler (`Profiler`, `SimpleProfiler`) for agent steps and store operations is in scope for workflow optimization. |
+| Git gc/pack beyond `prune_orphans` | Pack files and Git-style GC are not needed. Structured diagnostics with machine-readable error codes and `--repair` for common corruption patterns (orphans, stale locks, missing dirs, broken refs, reflog gaps, ghost epochs) are in scope for agent autonomy. |
+| Git-style pack files for store | Multi-resource atomicity for refs+manifest+reflog is in scope (currently used by merge operations via StoreTransaction). Rollback deletes manifests written during a failed commit. Snapshot and checkout use direct writes outside transactions. Git-style pack files are not in scope. |
+| Git reset (arbitrary tip move) | `reset_branch` covers the epoch-reset case; arbitrary rewriting deferred |
+| Facade `from autopilot import ...` | No `__init__.py` by design; import from terminal modules directly |
+| Per-parameter gradient routing | Current model is broadcast-then-accumulate; routing keys deferred |
+| Gradient mutation in backward hooks | Hooks are observation-only in non-differentiable domain (P4) |
 
 ## Influences
 

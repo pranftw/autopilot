@@ -1,40 +1,70 @@
-"""Experiment status gathering.
+"""Experiment status gathering from Forest and on-disk artifacts.
 
-Library function for collecting experiment health: manifest, run state,
-baseline, metrics, memory, and regression information.
+Resolves experiment state through ``Forest.query().filter(id=experiment_id).all()``
+and merges on-disk artifacts (``SummaryArtifact``, ``RunStateArtifact``, epoch dirs)
+from the workspace experiment directory.
+
+Removed fields (formerly from Manifest): ``decision``, ``decision_reason`` --
+policy gates own accept/reject decisions.
 """
 
-from autopilot.core.artifacts.experiment import BaselineArtifact, RunStateArtifact, SummaryArtifact
-from autopilot.core.comparison import load_metric_comparison
-from autopilot.core.memory import FileMemory
-from autopilot.tracking.manifest import load_manifest
+from autopilot.core.artifacts.experiment import RunStateArtifact, SummaryArtifact
+from autopilot.core.enums import Status
+from autopilot.core.errors import TrackingError
+from autopilot.core.forest import Forest
 from pathlib import Path
 from typing import Any
 
 
-def get_experiment_status(experiment_dir: Path) -> dict[str, Any]:
-  """Gather experiment status: manifest, run_state, baseline, metrics, memory."""
-  manifest = load_manifest(experiment_dir)
+def get_experiment_status(forest: Forest, experiment_id: str) -> dict[str, Any]:
+  """Gather experiment status from Forest-backed Experiment plus on-disk artifacts.
 
-  trained_epochs, latest_epoch = _scan_epoch_dirs(experiment_dir)
-  epoch = latest_epoch if latest_epoch > 0 else manifest.current_epoch
+  Loads the node via ``forest.query().filter(id=experiment_id).all()``. When no
+  node matches, raises ``TrackingError`` with an actionable message.
+
+  Populates ``id`` and ``epoch`` from ``node.experiment``. Omits ``decision``
+  and ``decision_reason`` (policy gates own accept/reject).
+
+  Resolves artifact directory as ``forest.store.config.experiment_path(slug=experiment_id)``
+  for ``SummaryArtifact``, ``RunStateArtifact``, and ``_scan_epoch_dirs``.
+
+  When duplicate ids exist across trees, uses the first match.
+
+  Args:
+    forest: Loaded forest (e.g. from ``load_forest``).
+    experiment_id: Experiment id / slug to resolve.
+
+  Returns:
+    Dict with trained epoch counts, experiment id/epoch, and stop metadata.
+
+  Raises:
+    TrackingError: When no node matches ``experiment_id`` in the forest.
+  """
+  nodes = forest.query().filter(id=experiment_id).all()
+  if len(nodes) == 0:
+    msg = f'experiment {experiment_id!r} not found in forest; register it in a tree first'
+    raise TrackingError(msg)
+
+  node = nodes[0]
+  exp = node.experiment
+  exp_dir = forest.store.config.experiment_path(slug=experiment_id)
+
+  trained_epochs, _latest_epoch = _scan_epoch_dirs(exp_dir)
 
   result: dict[str, Any] = {
-    'slug': manifest.slug,
-    'epoch': manifest.current_epoch,
+    'id': exp.id,
+    'epoch': exp.epoch,
     'trained_epochs': trained_epochs,
-    'decision': manifest.decision,
-    'decision_reason': manifest.decision_reason,
   }
 
-  summary = SummaryArtifact().read_raw(experiment_dir)
-  if summary:
+  summary = SummaryArtifact().read_raw(exp_dir)
+  if isinstance(summary, dict):
     result['stop_reason'] = summary.get('stop_reason')
     result['last_good_epoch'] = summary.get('last_good_epoch')
 
-  run_state = RunStateArtifact().read_raw(experiment_dir)
-  if run_state:
-    if run_state['status'] == 'running':
+  run_state = RunStateArtifact().read_raw(exp_dir)
+  if isinstance(run_state, dict):
+    if run_state['status'] == Status.running.value:
       result['stop_reason'] = 'crash'
     else:
       if 'stop_reason' not in result or result['stop_reason'] is None:
@@ -42,31 +72,18 @@ def get_experiment_status(experiment_dir: Path) -> dict[str, Any]:
       if 'last_good_epoch' not in result or result['last_good_epoch'] is None:
         result['last_good_epoch'] = run_state.get('last_good_epoch')
 
-  if epoch > 0:
-    mc = load_metric_comparison(experiment_dir, epoch)
-    if mc and mc.candidate_metrics:
-      result['last_metrics'] = mc.candidate_metrics
-
-  baseline_data = BaselineArtifact().read_raw(experiment_dir)
-  if baseline_data:
-    result['best_baseline'] = baseline_data
-
-  regression = _find_latest_regression(experiment_dir, latest_epoch)
-  if regression:
-    result['regression'] = regression
-
-  memory = FileMemory(experiment_dir)
-  mem_ctx = memory.context(epoch=epoch)
-  result['memory'] = {
-    'total_records': mem_ctx.total_records,
-    'blocked_strategies': mem_ctx.blocked,
-  }
-
   return result
 
 
 def _scan_epoch_dirs(exp_dir: Path) -> tuple[int, int]:
-  """Return (count, highest_epoch_number) from epoch dirs."""
+  """Return (count, highest_epoch_number) from epoch dirs.
+
+  Args:
+    exp_dir: Experiment directory to scan.
+
+  Returns:
+    Tuple of (epoch dir count, highest epoch number found).
+  """
   count = 0
   highest = 0
   if not exp_dir.exists():
@@ -80,20 +97,3 @@ def _scan_epoch_dirs(exp_dir: Path) -> tuple[int, int]:
       except (ValueError, IndexError):
         pass
   return count, highest
-
-
-def _find_latest_regression(exp_dir: Path, max_epoch: int) -> dict[str, Any] | None:
-  """Walk backwards from max_epoch to find the most recent regression."""
-  for ep in range(max_epoch, 0, -1):
-    mc = load_metric_comparison(exp_dir, ep)
-    if mc is None:
-      continue
-    if mc.regression_detected or mc.is_mixed:
-      regressed = [r['metric'] for r in mc.regressions]
-      verdict = 'regression' if mc.regression_detected else 'mixed'
-      return {
-        'epoch': ep,
-        'verdict': verdict,
-        'regressed_metrics': regressed,
-      }
-  return None

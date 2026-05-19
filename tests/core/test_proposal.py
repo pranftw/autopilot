@@ -1,6 +1,6 @@
 """Tests for proposal I/O helpers and data models."""
 
-from autopilot.core.proposal import (
+from autopilot.ai.proposal import (
   ChangeProposal,
   JudgeValidation,
   ProposalVerdict,
@@ -9,6 +9,9 @@ from autopilot.core.proposal import (
   record_proposal,
   record_verdict,
 )
+from autopilot.core.errors import TrackingError
+import json
+import pytest
 
 
 class TestProposalIO:
@@ -80,7 +83,18 @@ class TestChangeProposalRoundTrip:
 
   def test_timestamp_auto(self):
     p = ChangeProposal(proposal_id='p1')
-    assert p.timestamp != ''
+    assert p.timestamp
+
+
+class TestReadVerdictInvalidJsonObject:
+  def test_array_raises_tracking_error(self, tmp_path):
+    epoch_dir = tmp_path / 'epoch_1'
+    epoch_dir.mkdir()
+    verdict_file = epoch_dir / 'proposal_verdict.json'
+    verdict_file.write_text(json.dumps([1, 2, 3]))
+    with pytest.raises(TrackingError) as exc_info:
+      read_verdict(tmp_path, epoch=1)
+    assert 'list' in str(exc_info.value)
 
 
 class TestJudgeValidationRoundTrip:

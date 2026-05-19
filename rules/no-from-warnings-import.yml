@@ -1,0 +1,6 @@
+id: no-from-warnings-import
+language: Python
+severity: error
+message: Do not import from the warnings module. Raise specific exceptions instead. See CLAUDE.md Prohibited patterns.
+rule:
+  pattern: from warnings import $$$NAMES

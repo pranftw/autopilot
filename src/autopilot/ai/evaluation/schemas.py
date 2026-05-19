@@ -1,6 +1,6 @@
 """Pydantic schemas for AI eval generation and judging."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Any, Generic, TypeVar
 
 T = TypeVar('T', bound=BaseModel)
@@ -12,6 +12,8 @@ JR = TypeVar('JR', bound=BaseModel)
 
 
 class ConversationTurn(BaseModel):
+  """One message in a multi-turn conversation (OpenAI-style shape)."""
+
   role: str
   content: str
   name: str | None = None
@@ -22,10 +24,12 @@ class ConversationTurn(BaseModel):
 class DataItem(BaseModel, Generic[T]):
   """Generated eval dataset item.
 
-  Base: id, turns, split. Custom: ground_truth, metadata, domain, etc.
+  Base: item_id, turns, split. Custom: ground_truth, metadata, domain, etc.
   """
 
-  id: str
+  model_config = ConfigDict(populate_by_name=True)
+
+  item_id: str = Field(alias='id')
   turns: list[ConversationTurn]
   split: str | None = None
   custom: T
@@ -38,7 +42,9 @@ class JudgeInput(BaseModel, Generic[T]):
   Custom: ground_truth, benchmark_metadata, query, session context.
   """
 
-  id: str
+  model_config = ConfigDict(populate_by_name=True)
+
+  item_id: str = Field(alias='id')
   turns: list[ConversationTurn]
   response: str | None = None
   is_error: bool = False
@@ -60,15 +66,19 @@ class JudgeVerdict(BaseModel):
 class JudgeResult(BaseModel, Generic[T]):
   """Output from judge.
 
-  Base: id, verdict. Custom: project-specific result data.
+  Base: item_id, verdict. Custom: project-specific result data.
   """
 
-  id: str
+  model_config = ConfigDict(populate_by_name=True)
+
+  item_id: str = Field(alias='id')
   verdict: JudgeVerdict | None = None
   custom: T
 
 
 class RetryConfig(BaseModel):
+  """Retry policy for LLM API calls (backoff, limits, timeouts)."""
+
   max_retries: int
   min_timeout_ms: int
   max_timeout_ms: int
@@ -88,6 +98,8 @@ class RunConfig(BaseModel):
 
 
 class GeneratorConfig(BaseModel, Generic[T]):
+  """Full configuration for a generator pipeline run."""
+
   run: RunConfig
   dataset_id: str
   seed: int
@@ -98,24 +110,34 @@ class GeneratorConfig(BaseModel, Generic[T]):
 
 
 class JudgeConfig(BaseModel, Generic[T]):
+  """Full configuration for a judge pipeline run."""
+
   run: RunConfig
   system_prompt: str | None = None
   custom: T | None = None
 
 
 class CheckpointHeader(BaseModel):
-  type: str = 'header'
+  """First line of a ``checkpoint.jsonl`` file identifying the run."""
+
+  model_config = ConfigDict(populate_by_name=True)
+
+  checkpoint_type: str = Field(default='header', alias='type')
   subsystem: str
   config_hash: str
   created_at: str
-  args: dict[str, Any] = {}
+  args: dict[str, Any] = Field(default_factory=dict)
 
 
 class CheckpointEvent(BaseModel):
-  type: str
-  id: str
+  """Single event record in a ``checkpoint.jsonl`` file (result, skip, or error)."""
+
+  model_config = ConfigDict(populate_by_name=True)
+
+  event_kind: str = Field(alias='type')
+  item_id: str = Field(alias='id')
   timestamp: str
-  payload: dict[str, Any] = {}
+  payload: dict[str, Any] = Field(default_factory=dict)
 
 
 class VarDef(BaseModel):

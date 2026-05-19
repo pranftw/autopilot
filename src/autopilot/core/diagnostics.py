@@ -55,26 +55,47 @@ class Diagnostics(ArtifactOwner):
   to customize categorization, failure detection, node resolution, and scoring.
   """
 
-  def __init__(self, experiment_dir: Path) -> None:
-    self.__init_artifacts__()
-    self._dir = experiment_dir
+  def __init__(self, path: Path | None = None) -> None:
+    """Wire diagnosis/heatmap artifacts and optional base directory.
+
+    Args:
+      path: Directory root for epoch-scoped artifact I/O.
+    """
+    self.init_artifacts()
+    self.output_dir = path
     self.diagnoses_artifact = DiagnosesArtifact()
     self.heatmap_artifact = HeatmapArtifact()
 
   def categorize(self, item: dict) -> str:
-    """Assign a failure category. Override for domain-specific buckets."""
+    """Assign a failure category. Override for domain-specific buckets.
+
+    Returns:
+      Category string, defaulting from metadata or ``'uncategorized'``.
+    """
     return item.get('metadata', {}).get('category', 'uncategorized')
 
   def resolve_node(self, item: dict) -> str:
-    """Extract node identity from an item. Override for custom node resolution."""
+    """Extract node identity from an item. Override for custom node resolution.
+
+    Returns:
+      Node id string from ``item`` fields.
+    """
     return item.get('id') or item.get('metadata', {}).get('node', 'unknown')
 
   def is_failure(self, item: dict) -> bool:
-    """Determine if an item is a failure. Override for custom failure criteria."""
+    """Determine if an item is a failure. Override for custom failure criteria.
+
+    Returns:
+      True when ``success`` is false or ``error_message`` is set.
+    """
     return not item.get('success', True) or bool(item.get('error_message'))
 
   def score_node(self, node: str, items: list[dict]) -> NodeScore:
-    """Compute per-node health. Override for custom scoring (e.g. weighted)."""
+    """Compute per-node health. Override for custom scoring (e.g. weighted).
+
+    Returns:
+      ``NodeScore`` with totals and error rate for ``items``.
+    """
     total = len(items)
     failed = sum(1 for i in items if self.is_failure(i))
     return NodeScore(
@@ -84,18 +105,27 @@ class Diagnostics(ArtifactOwner):
     )
 
   def select_samples(self, items: list[dict], limit: int = 5) -> list[str]:
-    """Choose representative error messages. Override for custom sampling."""
+    """Choose representative error messages. Override for custom sampling.
+
+    Returns:
+      Up to ``limit`` error strings from failing items.
+    """
     samples: list[str] = []
     for item in items:
       if self.is_failure(item):
-        msg = item.get('error_message') or 'failed (no message)'
+        err = item.get('error_message')
+        msg = 'failed (no message)' if err is None else err
         samples.append(msg)
         if len(samples) >= limit:
           break
     return samples
 
   def analyze(self, data: list[dict], epoch: int) -> DiagnosticResult:
-    """Run full analysis. Returns pure data -- does NOT write anything."""
+    """Run full analysis. Returns pure data -- does NOT write anything.
+
+    Returns:
+      ``DiagnosticResult`` with diagnoses and per-node heatmap scores.
+    """
     by_category: dict[str, list[dict]] = {}
     by_node: dict[str, list[dict]] = {}
 
@@ -119,19 +149,30 @@ class Diagnostics(ArtifactOwner):
 
   def write(self, result: DiagnosticResult) -> None:
     """Persist a DiagnosticResult via owned artifacts."""
+    assert self.output_dir is not None, 'diagnostics directory must be set before write'
     for entry in result.diagnoses:
-      self.diagnoses_artifact.append(entry.to_dict(), self._dir, epoch=result.epoch)
+      self.diagnoses_artifact.append(entry.to_dict(), self.output_dir, epoch=result.epoch)
     heatmap_dict = {node: score.to_dict() for node, score in result.heatmap.items()}
-    self.heatmap_artifact.write(heatmap_dict, self._dir, epoch=result.epoch)
+    self.heatmap_artifact.write(heatmap_dict, self.output_dir, epoch=result.epoch)
 
   def read_diagnoses(self, epoch: int) -> list[DiagnosisEntry]:
-    """Read back diagnosis entries for an epoch."""
-    raw = self.diagnoses_artifact.read(self._dir, epoch=epoch)
+    """Read back diagnosis entries for an epoch.
+
+    Returns:
+      List of ``DiagnosisEntry`` values loaded from artifact storage.
+    """
+    assert self.output_dir is not None, 'diagnostics directory must be set before read'
+    raw = self.diagnoses_artifact.read(self.output_dir, epoch=epoch)
     return [DiagnosisEntry.from_dict(r) for r in raw]
 
   def read_heatmap(self, epoch: int) -> dict[str, NodeScore]:
-    """Read back node heatmap for an epoch."""
-    raw = self.heatmap_artifact.read(self._dir, epoch=epoch)
+    """Read back node heatmap for an epoch.
+
+    Returns:
+      Mapping of node id to ``NodeScore``, or empty dict when missing.
+    """
+    assert self.output_dir is not None, 'diagnostics directory must be set before read'
+    raw = self.heatmap_artifact.read(self.output_dir, epoch=epoch)
     if raw is None:
       return {}
     return {node: NodeScore.from_dict(score) for node, score in raw.items()}

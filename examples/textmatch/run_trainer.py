@@ -1,45 +1,103 @@
 """Lightning-style Trainer.fit() for text classification rules.
 
-Demonstrates: AutoPilotModule, Trainer, Policy, Store, StoreCheckpointCallback --
-same components as run.py but orchestrated by Trainer automatically.
+Accepts argparse flags for all tunable parameters. Use --json for
+structured output suitable for agent consumption.
 """
 
 from pathlib import Path
 from textmatch.data import TextMatchDataModule
 from textmatch.module import TextMatchModule
 from textmatch.trainer import build_trainer
+import argparse
+import json
 
 
 def example_dir() -> Path:
   return Path(__file__).parent
 
 
-def main():
+def main(argv: list[str] | None = None) -> dict:
+  parser = argparse.ArgumentParser(description='TextMatch Trainer.fit()')
+  parser.add_argument('--rules-dir', default=None, metavar='PATH')
+  parser.add_argument('--datasets-dir', default=None, metavar='PATH')
+  parser.add_argument('--store-path', default=None, metavar='PATH')
+  parser.add_argument('--max-epochs', type=int, default=5)
+  parser.add_argument('--threshold', type=float, default=0.30)
+  parser.add_argument('--accumulate-grad-batches', type=int, default=100)
+  parser.add_argument('--experiment', default=None, metavar='SLUG')
+  parser.add_argument('--json', action='store_true', dest='use_json')
+  args = parser.parse_args(argv)
+
   root = example_dir()
-  store_path = root / '.store'
+  rules_dir = args.rules_dir or str(root / 'rules')
+  datasets_dir = args.datasets_dir or str(root / 'datasets')
+  store_path = Path(args.store_path) if args.store_path else root / '.store'
 
-  module = TextMatchModule(str(root / 'rules'))
-  dm = TextMatchDataModule(str(root / 'datasets'))
-  trainer, store = build_trainer(module, store_path)
+  module = TextMatchModule(rules_dir)
+  dm = TextMatchDataModule(datasets_dir)
+  trainer, store = build_trainer(
+    module,
+    store_path,
+    threshold=args.threshold,
+    accumulate_grad_batches=args.accumulate_grad_batches,
+    experiment_slug=args.experiment,
+  )
 
-  print(f'=== TextMatch: Trainer.fit() [store slug: {store.slug}] ===\n')
-  result = trainer.fit(module, datamodule=dm, max_epochs=5)
+  experiment = trainer.experiment
+  experiment.add_context(
+    f'Starting rule optimization: max_epochs={args.max_epochs}, '
+    f'threshold={args.threshold}, accumulate_grad_batches={args.accumulate_grad_batches}.',
+    source='examples.textmatch.run_trainer',
+    metadata={
+      'argv_max_epochs': args.max_epochs,
+      'argv_threshold': args.threshold,
+      'argv_accumulate_grad_batches': args.accumulate_grad_batches,
+      'rules_dir': rules_dir,
+      'datasets_dir': datasets_dir,
+    },
+  )
 
-  print(f'\nTotal epochs: {result["total_epochs"]}')
+  result = trainer.fit(module, datamodule=dm, max_epochs=args.max_epochs)
+  experiment_id = experiment.id
+
+  output = {
+    'experiment': experiment_id,
+    'total_epochs': result['total_epochs'],
+    'epochs': [],
+  }
   for ep in result['epochs']:
-    train = ep.get('metrics', {})
-    val = ep.get('val_metrics', {})
-    parts = [f'Epoch {ep["epoch"]}:']
-    parts.append(f'train_acc={train.get("accuracy", 0):.2%}')
-    if val:
-      parts.append(f'val_acc={val.get("accuracy", 0):.2%}')
-    print(f'  {" ".join(parts)}')
+    train = ep['metrics']
+    val = ep.get('val_metrics')
+    acc = train.get('accuracy')
+    train_acc = acc if acc is not None else train.get('train_accuracy', 0.0)
+    val_acc = val['accuracy'] if val and 'accuracy' in val else None
+    output['epochs'].append(
+      {
+        'epoch': ep['epoch'],
+        'train_accuracy': train_acc,
+        'val_accuracy': val_acc,
+      }
+    )
 
-  print(f'\nStore history ({store.slug}):')
-  for entry in store.log():
-    print(f'  epoch {entry.epoch}: {entry.file_count} files @ {entry.timestamp}')
+  if result['epochs']:
+    last = output['epochs'][-1]
+    output['final_train_accuracy'] = last['train_accuracy']
+    output['final_val_accuracy'] = last['val_accuracy']
 
-  print('\nDone.')
+  if args.use_json:
+    print(json.dumps(output, indent=2))
+  else:
+    print(f'=== TextMatch: Trainer.fit() [experiment: {experiment_id}] ===\n')
+    for ep in output['epochs']:
+      parts = [f'Epoch {ep["epoch"]}:']
+      parts.append(f'train_acc={ep["train_accuracy"]:.2%}')
+      if ep['val_accuracy'] is not None:
+        parts.append(f'val_acc={ep["val_accuracy"]:.2%}')
+      print(f'  {" ".join(parts)}')
+    print(f'\nTotal epochs: {output["total_epochs"]}')
+    print('\nDone.')
+
+  return output
 
 
 if __name__ == '__main__':

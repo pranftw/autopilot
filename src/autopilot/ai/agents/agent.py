@@ -19,6 +19,12 @@ class Agent:
     limiter: RateLimiter | None = None,
     num_parallel: int = 1,
   ) -> None:
+    """Create an agent with optional rate limiting and default parallelism.
+
+    Args:
+      limiter: Optional limiter shared across concurrent agent calls.
+      num_parallel: Hint for how many concurrent tasks this agent may run.
+    """
     self._limiter = limiter
     self._num_parallel = num_parallel
 
@@ -31,7 +37,11 @@ class Agent:
     raise NotImplementedError
 
   def name(self) -> str:
-    """Agent identity. Override for custom names."""
+    """Agent identity. Override for custom names.
+
+    Returns:
+      Default implementation returns the concrete class name.
+    """
     return type(self).__name__
 
   def setup(self, **kwargs: Any) -> None:
@@ -42,6 +52,7 @@ class Agent:
 
   @property
   def limiter(self) -> RateLimiter | None:
+    """Optional rate limiter associated with this agent."""
     return self._limiter
 
   @limiter.setter
@@ -56,6 +67,7 @@ class Agent:
     """Restore agent state from checkpoint."""
 
   def __repr__(self) -> str:
+    """Return a simple representation using the concrete class name."""
     return f'{type(self).__name__}()'
 
 

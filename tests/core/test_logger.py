@@ -1,7 +1,8 @@
-"""Tests for Logger base class and JSONLogger."""
+"""Tests for Logger base class, JSONLogger, and module-level event helpers."""
 
-from autopilot.core.logger import JSONLogger, Logger
+from autopilot.core.logger import JSONLogger, Logger, append_event, create_event, load_events
 from pathlib import Path
+from unittest.mock import patch
 import pytest
 
 
@@ -75,6 +76,15 @@ class TestJSONLogger:
     logger = JSONLogger(Path('/tmp'))
     assert logger.name == 'json'
 
+  def test_finalize_failed(self, tmp_path: Path) -> None:
+    """JSONLogger records 'failed' finalize event."""
+    logger = JSONLogger(tmp_path / 'logs')
+    logger.finalize('failed')
+    events = logger.load_events()
+    finalize_events = [e for e in events if e.event_type == 'finalize']
+    assert len(finalize_events) == 1
+    assert finalize_events[0].message == 'failed'
+
   def test_creates_dir_on_log(self, tmp_path: Path) -> None:
     nested = tmp_path / 'a' / 'b'
     logger = JSONLogger(nested)
@@ -98,3 +108,39 @@ class TestCustomLogger:
     logger.log('start', 'beginning')
     logger.log_metrics({'x': 1.0})
     assert len(logger.entries) == 2
+
+
+class TestEventHelpers:
+  def test_create_event_sets_timestamp_from_utc_now_iso(self) -> None:
+    with patch(
+      'autopilot.core.logger.utc_now_iso',
+      return_value='2099-01-01T00:00:00+00:00',
+    ):
+      event = create_event('t')
+      assert event.timestamp == '2099-01-01T00:00:00+00:00'
+      assert event.metadata == {}
+
+  def test_create_event_with_metadata(self) -> None:
+    event = create_event('deploy', message='deploying', metadata={'env': 'prod'})
+    assert event.event_type == 'deploy'
+    assert event.message == 'deploying'
+    assert event.metadata == {'env': 'prod'}
+
+  def test_append_load_events_roundtrip(self, tmp_path: Path) -> None:
+    append_event(tmp_path, create_event('a', message='m'))
+    events = load_events(tmp_path)
+    assert len(events) == 1
+    assert events[0].event_type == 'a'
+    assert events[0].message == 'm'
+
+  def test_load_events_empty_dir(self, tmp_path: Path) -> None:
+    events = load_events(tmp_path)
+    assert events == []
+
+  def test_append_multiple_events(self, tmp_path: Path) -> None:
+    append_event(tmp_path, create_event('first'))
+    append_event(tmp_path, create_event('second'))
+    events = load_events(tmp_path)
+    assert len(events) == 2
+    assert events[0].event_type == 'first'
+    assert events[1].event_type == 'second'

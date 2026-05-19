@@ -5,6 +5,7 @@ requires-python = ">=3.12"
 dependencies = ["autopilot"]
 
 [tool.uv.sources]
+# This path reference requires running from within the autopilot repo.
 autopilot = { path = "../..", editable = true }
 
 [build-system]

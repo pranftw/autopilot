@@ -4,6 +4,7 @@ from autopilot.ai.agents.agent import Agent, AgentResult, StepAgent
 from autopilot.ai.agents.claude_code import ClaudeCodeAgent
 from autopilot.ai.evaluation.steps import Step, python_step
 from autopilot.core.errors import AgentError
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 import json
 import pytest
@@ -44,7 +45,7 @@ def test_agent_limiter_get_set():
   a = Agent()
   assert a.limiter is None
   x = object()
-  a.limiter = x
+  cast(Any, a).limiter = x
   assert a.limiter is x
 
 

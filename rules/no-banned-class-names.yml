@@ -1,0 +1,9 @@
+id: no-banned-class-names
+language: Python
+severity: error
+message: "Banned class name. Use Sequential from core/ops.py or explicit wiring instead (CLAUDE.md)."
+rule:
+  kind: class_definition
+  has:
+    field: name
+    regex: "^(SequenceModule|ParallelModule)$"

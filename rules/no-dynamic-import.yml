@@ -1,0 +1,8 @@
+id: no-dynamic-import
+language: Python
+severity: error
+message: "No dynamic imports. Use static imports at module top level instead (CLAUDE.md)."
+rule:
+  any:
+    - pattern: importlib.import_module($$$ARGS)
+    - pattern: __import__($$$ARGS)

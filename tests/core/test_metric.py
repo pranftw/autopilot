@@ -1,9 +1,9 @@
 """Tests for torchmetrics-style metric base classes."""
 
 from autopilot.core.metric import Metric, MetricCollection
-from autopilot.core.module import Module
+from autopilot.core.module.module import Module
 from autopilot.core.parameter import Parameter
-from autopilot.core.types import Datum
+from autopilot.core.types import Datum, EvalDatum
 import pytest
 
 
@@ -58,7 +58,7 @@ class _ErrorRateMetric(Metric):
 
 class _LeafModule(Module):
   def forward(self, *args, **kwargs):
-    return Datum(success=True)
+    return EvalDatum(success=True)
 
 
 class _MetricWithParam(Metric):
@@ -163,7 +163,7 @@ class TestAddState:
 
   def test_reset_restores_value(self) -> None:
     m = _SumMetric()
-    m.update(Datum(metrics={'x': 10.0}))
+    m.update(EvalDatum(metrics={'x': 10.0}))
     assert m._total == 10.0
     m.reset()
     assert m._total == 0.0
@@ -189,14 +189,14 @@ class TestAddState:
 
   def test_reset_multiple_states(self) -> None:
     m = _SumMetric()
-    m.update(Datum(metrics={'x': 5.0}))
+    m.update(EvalDatum(metrics={'x': 5.0}))
     m.reset()
     assert m._total == 0.0
     assert m._count == 0
 
   def test_reset_resets_update_count(self) -> None:
     m = _SumMetric()
-    m.update(Datum(metrics={'x': 1.0}))
+    m.update(EvalDatum(metrics={'x': 1.0}))
     assert m.update_count == 1
     m.reset()
     assert m.update_count == 0
@@ -211,18 +211,20 @@ class TestAddState:
     assert '_total' in m._defaults
     assert '_count' in m._defaults
 
-  def test_no_manual_reset_needed(self) -> None:
+  def test_reset_clears_update_count(self) -> None:
     m = _SumMetric()
-    m.update(Datum(metrics={'x': 10.0}))
+    m.update(EvalDatum(metrics={'x': 10.0}))
     m.reset()
-    assert m.compute() == {'avg': 0.0}
+    assert m._update_count == 0
+    assert m._total == 0.0
+    assert m._count == 0
 
 
 class TestUpdateWrapping:
   def test_update_count_incremented(self) -> None:
     m = _SumMetric()
-    m.update(Datum(metrics={'x': 1.0}))
-    m.update(Datum(metrics={'x': 2.0}))
+    m.update(EvalDatum(metrics={'x': 1.0}))
+    m.update(EvalDatum(metrics={'x': 2.0}))
     assert m.update_count == 2
 
   def test_update_count_property(self) -> None:
@@ -233,14 +235,14 @@ class TestUpdateWrapping:
 
   def test_update_count_reset_by_reset(self) -> None:
     m = _SumMetric()
-    m.update(Datum(metrics={'x': 1.0}))
+    m.update(EvalDatum(metrics={'x': 1.0}))
     m.reset()
     assert m.update_count == 0
 
   def test_wrapped_update_preserves_behavior(self) -> None:
     m = _SumMetric()
-    m.update(Datum(metrics={'x': 10.0}))
-    m.update(Datum(metrics={'y': 20.0}))
+    m.update(EvalDatum(metrics={'x': 10.0}))
+    m.update(EvalDatum(metrics={'y': 20.0}))
     assert m.compute() == {'avg': 15.0}
 
 
@@ -266,7 +268,7 @@ class TestHigherIsBetter:
 class TestMetricClone:
   def test_clone_fresh_state(self) -> None:
     m = _SumMetric()
-    m.update(Datum(metrics={'x': 5.0}))
+    m.update(EvalDatum(metrics={'x': 5.0}))
     c = m.clone()
     assert c._total == 5.0
     c.reset()
@@ -281,31 +283,32 @@ class TestMetricClone:
   def test_clone_independent(self) -> None:
     m = _SumMetric()
     c = m.clone()
-    c.update(Datum(metrics={'x': 100.0}))
+    c.update(EvalDatum(metrics={'x': 100.0}))
     assert m._total == 0.0
 
 
 class TestMetricUpdateComputeReset:
   def test_update_compute_cycle(self) -> None:
     m = _SumMetric()
-    m.update(Datum(metrics={'a': 1.0}))
-    m.update(Datum(metrics={'b': 2.0}))
-    m.update(Datum(metrics={'c': 3.0}))
+    m.update(EvalDatum(metrics={'a': 1.0}))
+    m.update(EvalDatum(metrics={'b': 2.0}))
+    m.update(EvalDatum(metrics={'c': 3.0}))
     assert m.compute() == {'avg': 2.0}
 
-  def test_reset_clears(self) -> None:
+  def test_reset_then_compute_raises(self) -> None:
     m = _SumMetric()
-    m.update(Datum(metrics={'x': 5.0}))
+    m.update(EvalDatum(metrics={'x': 5.0}))
     m.reset()
-    assert m.compute() == {'avg': 0.0}
+    with pytest.raises(RuntimeError, match='without prior update'):
+      m.compute()
 
   def test_multiple_cycles(self) -> None:
     m = _SumMetric()
-    m.update(Datum(metrics={'x': 4.0}))
+    m.update(EvalDatum(metrics={'x': 4.0}))
     assert m.compute() == {'avg': 4.0}
     m.reset()
-    m.update(Datum(metrics={'x': 1.0}))
-    m.update(Datum(metrics={'x': 3.0}))
+    m.update(EvalDatum(metrics={'x': 1.0}))
+    m.update(EvalDatum(metrics={'x': 3.0}))
     assert m.compute() == {'avg': 2.0}
 
 
@@ -395,13 +398,13 @@ class TestMetricCollection:
 
   def test_update_delegates(self) -> None:
     c = _SumMetric() + _CountMetric()
-    c.update(Datum(metrics={'x': 2.0}))
+    c.update(EvalDatum(metrics={'x': 2.0}))
     assert c.compute() == {'avg': 2.0, 'count': 1.0}
 
   def test_compute_merges(self) -> None:
     c = _SumMetric() + _CountMetric()
-    c.update(Datum(metrics={'x': 2.0}))
-    c.update(Datum(metrics={'x': 4.0}))
+    c.update(EvalDatum(metrics={'x': 2.0}))
+    c.update(EvalDatum(metrics={'x': 4.0}))
     assert c.compute() == {'avg': 3.0, 'count': 2.0}
 
   def test_key_collision_raises(self) -> None:
@@ -416,30 +419,31 @@ class TestMetricCollection:
         return {'avg': 1.0}
 
     c = MetricCollection([_SumMetric(), SameKeyMetric()])
-    c.update(Datum(metrics={'x': 1.0}))
+    c.update(EvalDatum(metrics={'x': 1.0}))
     with pytest.raises(ValueError, match='collision'):
       c.compute()
 
   def test_prefix(self) -> None:
     c = MetricCollection([_SumMetric()], prefix='val_')
-    c.update(Datum(metrics={'x': 5.0}))
+    c.update(EvalDatum(metrics={'x': 5.0}))
     assert 'val_avg' in c.compute()
 
   def test_postfix(self) -> None:
     c = MetricCollection([_SumMetric()], postfix='_mean')
-    c.update(Datum(metrics={'x': 5.0}))
+    c.update(EvalDatum(metrics={'x': 5.0}))
     assert 'avg_mean' in c.compute()
 
   def test_prefix_and_postfix(self) -> None:
     c = MetricCollection([_SumMetric()], prefix='val_', postfix='_mean')
-    c.update(Datum(metrics={'x': 5.0}))
+    c.update(EvalDatum(metrics={'x': 5.0}))
     assert 'val_avg_mean' in c.compute()
 
   def test_reset_all(self) -> None:
     c = _SumMetric() + _CountMetric()
-    c.update(Datum(metrics={'x': 1.0}))
+    c.update(EvalDatum(metrics={'x': 1.0}))
     c.reset()
-    assert c.compute() == {'avg': 0.0, 'count': 0.0}
+    with pytest.raises(RuntimeError, match='without prior update'):
+      c.compute()
 
   def test_children_registered_as_modules(self) -> None:
     c = MetricCollection({'a': _SumMetric(), 'b': _CountMetric()})
@@ -449,11 +453,13 @@ class TestMetricCollection:
 
   def test_clone(self) -> None:
     c = MetricCollection([_SumMetric(), _CountMetric()])
-    c.update(Datum(metrics={'x': 1.0}))
+    c.update(EvalDatum(metrics={'x': 1.0}))
     c2 = c.clone()
-    c2.reset()
     assert c.compute()['count'] == 1.0
-    assert c2.compute()['count'] == 0.0
+    assert c2.compute()['count'] == 1.0
+    c2.reset()
+    with pytest.raises(RuntimeError, match='without prior update'):
+      c2.compute()
 
   def test_repr(self) -> None:
     c = MetricCollection({'a': _SumMetric(), 'b': _CountMetric()})
@@ -469,7 +475,7 @@ class TestMetricCollection:
   def test_nested_collection(self) -> None:
     inner = MetricCollection([_SumMetric()], prefix='inner_')
     outer = MetricCollection({'group': inner, 'count': _CountMetric()})
-    outer.update(Datum(metrics={'x': 5.0}))
+    outer.update(EvalDatum(metrics={'x': 5.0}))
     result = outer.compute()
     assert 'inner_avg' in result
     assert 'count' in result
@@ -497,3 +503,112 @@ class TestMetricCompetingStore:
     assert 'x' in mod._parameters
     assert 'x' not in mod._modules
     assert mod.x is p
+
+
+class TestMetricComputeCache:
+  def test_metric_compute_cache(self) -> None:
+    m = _SumMetric()
+    m.update(EvalDatum(metrics={'x': 5.0}))
+    a = m.compute()
+    b = m.compute()
+    assert a is b
+
+  def test_metric_cache_cleared_on_update(self) -> None:
+    m = _SumMetric()
+    m.update(EvalDatum(metrics={'x': 5.0}))
+    first = m.compute()
+    m.update(EvalDatum(metrics={'x': 10.0}))
+    second = m.compute()
+    assert first is not second
+    assert first['avg'] == 5.0
+    assert second['avg'] == 7.5
+
+  def test_metric_compute_without_update_raises(self) -> None:
+    m = _SumMetric()
+    with pytest.raises(RuntimeError, match='without prior update'):
+      m.compute()
+
+  def test_metric_compute_after_update_succeeds(self) -> None:
+    m = _SumMetric()
+    m.update(EvalDatum(metrics={'x': 5.0}))
+    result = m.compute()
+    assert isinstance(result, dict)
+    assert result == {'avg': 5.0}
+
+  def test_metric_compute_cached_after_update(self) -> None:
+    m = _SumMetric()
+    m.update(EvalDatum(metrics={'x': 3.0}))
+    first = m.compute()
+    second = m.compute()
+    assert first is second
+
+  def test_metric_compute_after_reset_raises(self) -> None:
+    m = _SumMetric()
+    m.update(EvalDatum(metrics={'x': 1.0}))
+    m.compute()
+    m.reset()
+    with pytest.raises(RuntimeError, match='without prior update'):
+      m.compute()
+
+  def test_metric_compute_returns_same_object(self) -> None:
+    m = _SumMetric()
+    m.update(EvalDatum(metrics={'x': 3.0}))
+    a = m.compute()
+    b = m.compute()
+    assert a is b
+    a['avg'] = 999.0
+    c = m.compute()
+    assert c['avg'] == 999.0
+
+  def test_metric_cache_cleared_on_reset(self) -> None:
+    m = _SumMetric()
+    m.update(EvalDatum(metrics={'x': 5.0}))
+    first = m.compute()
+    m.reset()
+    m.update(EvalDatum(metrics={'x': 10.0}))
+    second = m.compute()
+    assert first is not second
+    assert second['avg'] == 10.0
+
+
+class TestMetricCollectionComputeGuard:
+  def test_metric_collection_compute_without_update_raises(self) -> None:
+    c = MetricCollection([_SumMetric(), _CountMetric()])
+    with pytest.raises(RuntimeError, match='without prior update'):
+      c.compute()
+
+  def test_metric_collection_compute_after_update_succeeds(self) -> None:
+    c = MetricCollection([_SumMetric(), _CountMetric()])
+    c.update(EvalDatum(metrics={'x': 3.0}))
+    result = c.compute()
+    assert result == {'avg': 3.0, 'count': 1.0}
+
+
+class TestMetricCollectionCacheSemantics:
+  def test_child_metric_cache_works_through_collection(self) -> None:
+    m1 = _SumMetric()
+    m2 = _CountMetric()
+    collection = MetricCollection({'sum': m1, 'count': m2})
+    collection.update(EvalDatum(metrics={'x': 5.0}))
+    x = m1.compute()
+    y = m1.compute()
+    assert x is y
+
+  def test_second_update_invalidates_child_cache(self) -> None:
+    m1 = _SumMetric()
+    m2 = _CountMetric()
+    collection = MetricCollection({'sum': m1, 'count': m2})
+    collection.update(EvalDatum(metrics={'x': 5.0}))
+    x = m1.compute()
+    collection.update(EvalDatum(metrics={'x': 10.0}))
+    x2 = m1.compute()
+    assert x2 is not x
+
+  def test_collection_compute_cache(self) -> None:
+    m1 = _SumMetric()
+    m2 = _CountMetric()
+    collection = MetricCollection({'sum': m1, 'count': m2})
+    collection.update(EvalDatum(metrics={'x': 5.0}))
+    out1 = collection.compute()
+    out2 = collection.compute()
+    assert out1 is out2

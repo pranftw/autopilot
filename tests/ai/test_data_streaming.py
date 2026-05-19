@@ -1,20 +1,20 @@
 """Tests for StreamingDataset."""
 
 from autopilot.ai.evaluation.schemas import ConversationTurn, DataItem
-from autopilot.core.types import Datum
+from autopilot.core.types import Datum, EvalDatum
 from autopilot.data.dataloader import DataLoader
 from autopilot.data.dataset import IterableDataset, StreamingDataset
 from pydantic import BaseModel
-from typing import Any
+from typing import Any, cast
 
 
 class _Custom(BaseModel):
   value: int
 
 
-def _make_item(id: str, value: int) -> DataItem[_Custom]:
+def _make_item(id_: str, value: int) -> DataItem[_Custom]:
   return DataItem(
-    id=id,
+    id=id_,
     turns=[ConversationTurn(role='user', content='hi')],
     custom=_Custom(value=value),
   )
@@ -34,7 +34,7 @@ def test_streaming_reads_lazily(tmp_path):
   ds = StreamingDataset(path, DataItem[_Custom])
   result = list(ds)
   assert len(result) == 10
-  assert result[0].id == 'item_0'
+  assert result[0].item_id == 'item_0'
   assert result[9].custom.value == 9
 
 
@@ -50,10 +50,10 @@ def test_streaming_is_iterable_dataset(tmp_path):
 
 
 def _pydantic_collate(batch: list[Any]) -> Datum:
-  items = [Datum(metadata={'raw': item}) for item in batch]
+  items = [EvalDatum(metadata={'raw': item}) for item in batch]
   if len(items) == 1:
     return items[0]
-  return Datum(items=items)
+  return Datum(items=cast(Any, items))
 
 
 def test_streaming_with_dataloader(tmp_path):
@@ -84,7 +84,7 @@ def test_streaming_skips_blank_lines(tmp_path):
   ds = StreamingDataset(path, DataItem[_Custom])
   result = list(ds)
   assert len(result) == 1
-  assert result[0].id == 'x'
+  assert result[0].item_id == 'x'
 
 
 def test_streaming_multiple_iterations(tmp_path):

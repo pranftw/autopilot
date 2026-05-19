@@ -1,9 +1,10 @@
-"""Diagnose command -- read diagnosis artifacts and cross-reference memory."""
+"""Diagnose command -- read diagnosis artifacts."""
 
-from autopilot.cli.command import Command, argument, subcommand
+from autopilot.cli.command import Command
 from autopilot.cli.context import CLIContext
+from autopilot.cli.helpers import resolve_command_epoch
+from autopilot.cli.primitives import argument, subcommand
 from autopilot.core.artifacts.epoch import DiagnosesArtifact, HeatmapArtifact
-from autopilot.core.memory import FileMemory
 from typing import Any
 import argparse
 
@@ -16,15 +17,12 @@ class DiagnoseCommand(Command):
 
   @argument('--category', default=None, help='filter by failure category')
   @argument('--node', default=None, help='filter by node')
-  @subcommand('run', help='run diagnosis on epoch artifacts')
+  @subcommand('run', help_text='run diagnosis on epoch artifacts')
   def run_diagnose(self, ctx: CLIContext, args: argparse.Namespace) -> None:
-    """Run diagnosis on epoch artifacts and cross-reference memory."""
-    epoch = args.epoch or ctx.epoch
-    if not epoch:
-      ctx.output.error('--epoch is required')
-      return
+    """Run diagnosis on epoch artifacts."""
+    epoch = resolve_command_epoch(ctx, args)
 
-    exp_dir = ctx.experiment_dir()
+    exp_dir = ctx.experiment_path()
     diagnoses = DiagnosesArtifact().read_raw(exp_dir, epoch=epoch)
 
     if args.category:
@@ -32,42 +30,22 @@ class DiagnoseCommand(Command):
     if args.node:
       diagnoses = [d for d in diagnoses if d.get('node') == args.node]
 
-    memory = FileMemory(exp_dir)
-    similar_fixes: list[dict[str, Any]] = []
-    for d in diagnoses:
-      records = memory.recall(
-        category=d.get('category'),
-        node=d.get('node'),
-      )
-      if records:
-        similar_fixes.append(
-          {
-            'diagnosis': d,
-            'past_fixes': [r.to_dict() for r in records[:3]],
-          }
-        )
-
     result: dict[str, Any] = {
       'epoch': epoch,
       'diagnoses': diagnoses,
-      'similar_fixes': similar_fixes,
     }
     ctx.output.result(result)
 
-  @subcommand('heatmap', help='show node error heatmap')
+  @subcommand('heatmap', help_text='show node error heatmap')
   def heatmap(self, ctx: CLIContext, args: argparse.Namespace) -> None:
     """Display the node error heatmap for an epoch."""
-    epoch = args.epoch or ctx.epoch
-    if not epoch:
-      ctx.output.error('--epoch is required')
-      return
+    epoch = resolve_command_epoch(ctx, args)
 
-    exp_dir = ctx.experiment_dir()
+    exp_dir = ctx.experiment_path()
     data = HeatmapArtifact().read_raw(exp_dir, epoch=epoch)
 
     if data is None:
-      ctx.output.error(f'no heatmap artifact found for epoch {epoch}')
-      return
+      ctx.fail(f'no heatmap artifact found for epoch {epoch}')
 
     result: dict[str, Any] = {
       'epoch': epoch,

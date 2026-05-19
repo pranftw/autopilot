@@ -1,0 +1,9 @@
+id: no-except-return-empty-dict
+language: Python
+severity: error
+message: "Do not use 'except Exception: return {}'. Propagate errors instead."
+rule:
+  pattern: "return {}"
+  inside:
+    kind: except_clause
+    stopBy: end

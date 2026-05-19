@@ -1,0 +1,15 @@
+id: no-multi-for-comprehension
+language: Python
+severity: error
+message: "Multiple 'for' clauses in comprehensions are banned (Google 2.7). Use a nested loop or helper function."
+rule:
+  kind: for_in_clause
+  follows:
+    kind: for_in_clause
+  inside:
+    any:
+      - kind: list_comprehension
+      - kind: set_comprehension
+      - kind: dictionary_comprehension
+      - kind: generator_expression
+    stopBy: end

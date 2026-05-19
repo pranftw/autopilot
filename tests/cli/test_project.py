@@ -4,9 +4,10 @@ from autopilot.cli.commands.project import ProjectCommand, ProjectInit
 from autopilot.cli.context import CLIContext
 from autopilot.cli.main import build_parser
 from autopilot.cli.output import Output
+from autopilot.cli.primitives import ArgparseCLIError
+from autopilot.core.config import AutoPilotConfig
 from pathlib import Path
 import argparse
-import autopilot.core.paths as paths
 import pytest
 
 
@@ -19,10 +20,14 @@ def _args(**kwargs) -> argparse.Namespace:
   return argparse.Namespace(**kwargs)
 
 
+def _config(tmp_path: Path, project: str = 'p1') -> AutoPilotConfig:
+  return AutoPilotConfig(workspace=tmp_path, project=project)
+
+
 class TestProjectInitParser:
   def test_requires_name(self) -> None:
     parser = build_parser()
-    with pytest.raises(SystemExit):
+    with pytest.raises(ArgparseCLIError):
       parser.parse_args(['project', 'init'])
 
   def test_parses_name(self) -> None:
@@ -41,7 +46,7 @@ class TestProjectListParser:
 class TestProjectDoctorParser:
   def test_requires_name(self) -> None:
     parser = build_parser()
-    with pytest.raises(SystemExit):
+    with pytest.raises(ArgparseCLIError):
       parser.parse_args(['project', 'doctor'])
 
 
@@ -49,37 +54,37 @@ class TestProjectInitHandler:
   def test_creates_directory_structure(self, tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
     ProjectInit()(ctx, _args(name='p1'))
-    proj = paths.root(tmp_path, 'p1')
-    assert proj.is_dir()
-    assert (proj / 'ai').is_dir()
-    assert paths.experiments(tmp_path, 'p1').is_dir()
-    assert paths.datasets(tmp_path, 'p1').is_dir()
-    assert paths.records(tmp_path, 'p1').is_dir()
-    assert (paths.records(tmp_path, 'p1') / 'promotions').is_dir()
-    assert (paths.records(tmp_path, 'p1') / 'notes').is_dir()
+    config = _config(tmp_path)
+    assert config.root.is_dir()
+    assert (config.root / 'ai').is_dir()
+    assert config.experiments_path.is_dir()
+    assert config.datasets_path.is_dir()
+    assert config.records_path.is_dir()
+    assert (config.records_path / 'promotions').is_dir()
+    assert (config.records_path / 'notes').is_dir()
 
   def test_idempotent(self, tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
     ProjectInit()(ctx, _args(name='p1'))
     ProjectInit()(ctx, _args(name='p1'))
-    assert paths.root(tmp_path, 'p1').is_dir()
+    assert _config(tmp_path).root.is_dir()
 
   def test_creates_skeleton_files(self, tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
     ProjectInit()(ctx, _args(name='p1', bare=False))
-    proj = paths.root(tmp_path, 'p1')
-    assert paths.project_cli(tmp_path, 'p1').is_file()
-    assert (proj / 'module.py').is_file()
-    assert (proj / 'data.py').is_file()
-    cli_content = paths.project_cli(tmp_path, 'p1').read_text()
+    config = _config(tmp_path)
+    assert config.cli_file.is_file()
+    assert (config.root / 'module.py').is_file()
+    assert (config.root / 'data.py').is_file()
+    cli_content = config.cli_file.read_text()
     assert "project='p1'" in cli_content
 
   def test_bare_skips_skeleton(self, tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
     ProjectInit()(ctx, _args(name='p1', bare=True))
-    assert not paths.project_cli(tmp_path, 'p1').exists()
-    proj = paths.root(tmp_path, 'p1')
-    assert not (proj / 'module.py').exists()
+    config = _config(tmp_path)
+    assert not config.cli_file.exists()
+    assert not (config.root / 'module.py').exists()
 
   def test_doctor_passes_after_init(self, tmp_path: Path, capsys) -> None:
     ctx = _ctx(tmp_path)

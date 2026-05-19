@@ -1,0 +1,6 @@
+id: no-input-call
+language: Python
+severity: error
+message: "No interactive prompts. Use CLI args or configuration instead of input() (agent-first design)."
+rule:
+  pattern: input($$$ARGS)

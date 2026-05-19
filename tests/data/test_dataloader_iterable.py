@@ -5,17 +5,9 @@ from autopilot.core.loops.loop import LoopConfig
 from autopilot.core.types import Datum
 from autopilot.data.dataloader import DataLoader
 from autopilot.data.dataset import IterableDataset
+from tests.doubles import EvalDatumIterable
 from unittest.mock import MagicMock
 import pytest
-
-
-class _CountingIterable(IterableDataset):
-  def __init__(self, n: int) -> None:
-    self._n = n
-
-  def __iter__(self):
-    for i in range(self._n):
-      yield Datum(metadata={'idx': i})
 
 
 class _EmptyIterable(IterableDataset):
@@ -31,12 +23,12 @@ def _make_trainer(module=None):
   trainer.policy = None
   trainer.experiment = None
   trainer.should_stop_at = MagicMock(return_value=False)
-  trainer._dispatch = MagicMock()
+  trainer.dispatch_callbacks = MagicMock()
   return trainer
 
 
 def test_iterable_dataset_runs_without_len():
-  loader = DataLoader(_CountingIterable(5), batch_size=2)
+  loader = DataLoader(EvalDatumIterable(5), batch_size=2)
   config = LoopConfig(max_epochs=1, train_loader=loader)
   trainer = _make_trainer()
   loop = EpochLoop()
@@ -56,7 +48,7 @@ def test_empty_iterable_dataset():
 
 
 def test_accumulation_with_iterable_dataset():
-  loader = DataLoader(_CountingIterable(6), batch_size=2)
+  loader = DataLoader(EvalDatumIterable(6), batch_size=2)
   config = LoopConfig(max_epochs=1, train_loader=loader, accumulate_grad_batches=2)
   optimizer = MagicMock()
   config.optimizer = optimizer
@@ -66,17 +58,8 @@ def test_accumulation_with_iterable_dataset():
   assert optimizer.step.call_count == 2
 
 
-def test_length_hint_enables_len():
-  loader = DataLoader(_CountingIterable(10), batch_size=5, length_hint=10)
-  assert len(loader) == 2
-
-
-def test_length_hint_drop_last():
-  loader = DataLoader(_CountingIterable(7), batch_size=3, length_hint=7, drop_last=True)
-  assert len(loader) == 2
-
-
 def test_no_length_hint_raises():
-  loader = DataLoader(_CountingIterable(5), batch_size=1)
+  """Iterable datasets without __len__ raise TypeError on len()."""
+  loader = DataLoader(EvalDatumIterable(5), batch_size=1)
   with pytest.raises(TypeError, match='IterableDataset'):
     len(loader)

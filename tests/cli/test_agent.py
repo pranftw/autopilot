@@ -1,32 +1,21 @@
-"""Tests for agent CLI command."""
+"""Tests for agent CLI command removal (BUG-071).
 
-from autopilot.cli.commands.agent import AgentCommand
-from unittest.mock import MagicMock
-import pytest
+The agent command has been removed entirely. These tests confirm
+the module is gone and no NotImplementedError surfaces.
+"""
+
+from autopilot.cli.main import AutoPilotCLI
+from pathlib import Path
 
 
-class TestAgentCommand:
-  def test_instantiates(self):
-    cmd = AgentCommand()
-    assert cmd.name == 'agent'
+class TestAgentCommandRemoved:
+  def test_agent_not_registered(self) -> None:
+    """AutoPilotCLI no longer registers an 'agent' command."""
+    cli = AutoPilotCLI()
+    assert 'agent' not in cli.commands
 
-  def test_run_raises_not_implemented(self):
-    cmd = AgentCommand()
-    ctx = MagicMock()
-    args = MagicMock(task='optimize rules', session='')
-    with pytest.raises(NotImplementedError, match='agent sessions not yet implemented'):
-      cmd.run_agent(ctx, args)
-
-  def test_list_raises_not_implemented(self):
-    cmd = AgentCommand()
-    ctx = MagicMock()
-    args = MagicMock()
-    with pytest.raises(NotImplementedError, match='agent sessions not yet implemented'):
-      cmd.list_sessions(ctx, args)
-
-  def test_session_raises_not_implemented(self):
-    cmd = AgentCommand()
-    ctx = MagicMock()
-    args = MagicMock(session='some-id')
-    with pytest.raises(NotImplementedError, match='agent sessions not yet implemented'):
-      cmd.session_info(ctx, args)
+  def test_agent_module_file_deleted(self) -> None:
+    """The agent command module file no longer exists on disk."""
+    repo = Path(__file__).resolve().parent.parent.parent
+    agent_file = repo / 'src' / 'autopilot' / 'cli' / 'commands' / 'agent.py'
+    assert not agent_file.exists()

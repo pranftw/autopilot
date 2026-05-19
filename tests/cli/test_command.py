@@ -1,9 +1,8 @@
 """Tests for CLI command base classes: Argument, Flag, Command, CLI."""
 
-from autopilot.cli.command import (
-  CLI,
+from autopilot.cli.command import CLI, Command
+from autopilot.cli.primitives import (
   Argument,
-  Command,
   Flag,
   SubcommandMeta,
   argument,
@@ -11,6 +10,7 @@ from autopilot.cli.command import (
   collect_subcommands,
   subcommand,
 )
+from typing import Any, cast
 import argparse
 import pytest
 
@@ -54,30 +54,32 @@ class TestFlag:
 
 class TestSubcommandDecorator:
   def test_attaches_meta(self) -> None:
-    @subcommand('run', help='execute')
+    @subcommand('run', help_text='execute')
     def handler(self, ctx, args):
       pass
 
-    assert hasattr(handler, '_subcommand_meta')
-    assert isinstance(handler._subcommand_meta, SubcommandMeta)
+    decorated = cast(Any, handler)
+    assert isinstance(decorated.subcommand_meta, SubcommandMeta)
 
   def test_meta_fields(self) -> None:
-    @subcommand('run', help='execute')
+    @subcommand('run', help_text='execute')
     def handler(self, ctx, args):
       pass
 
-    meta = handler._subcommand_meta
+    decorated = cast(Any, handler)
+    meta = decorated.subcommand_meta
     assert meta.name == 'run'
     assert meta.help == 'execute'
     assert meta.arguments == []
 
   def test_argument_decorator_appends(self) -> None:
     @argument('--count', type=int, default=0)
-    @subcommand('run', help='execute')
+    @subcommand('run', help_text='execute')
     def handler(self, ctx, args):
       pass
 
-    meta = handler._subcommand_meta
+    decorated = cast(Any, handler)
+    meta = decorated.subcommand_meta
     assert len(meta.arguments) == 1
     assert meta.arguments[0][0] == ('--count',)
 
@@ -118,11 +120,11 @@ class TestCollectSubcommands:
     class Cmd(Command):
       name = 'test'
 
-      @subcommand('first', help='1st')
+      @subcommand('first', help_text='1st')
       def first(self, ctx, args):
         pass
 
-      @subcommand('second', help='2nd')
+      @subcommand('second', help_text='2nd')
       def second(self, ctx, args):
         pass
 
@@ -136,7 +138,7 @@ class TestCollectSubcommands:
     class Cmd(Command):
       name = 'test'
 
-      @subcommand('only', help='only one')
+      @subcommand('only', help_text='only one')
       def only(self, ctx, args):
         pass
 
@@ -151,7 +153,7 @@ class TestCollectSubcommands:
     class Cmd(Command):
       name = 'test'
 
-      @subcommand('act', help='action')
+      @subcommand('act', help_text='action')
       def act(self, ctx, args):
         pass
 
@@ -257,7 +259,7 @@ class TestCommand:
       name = 'cmd'
       help = 'inline test'
 
-      @subcommand('action', help='do action')
+      @subcommand('action', help_text='do action')
       def action(self, ctx, args):
         pass
 
@@ -284,7 +286,7 @@ class TestCommand:
         super().__init__()
         self.leaf = Leaf()
 
-      @subcommand('inline', help='inline sub')
+      @subcommand('inline', help_text='inline sub')
       def inline(self, ctx, args):
         pass
 
@@ -372,19 +374,6 @@ class TestCLI:
     args = parser.parse_args(['hello', '--workspace', '.'])
     assert args.command == 'hello'
 
-  def test_configure_commands_hook(self) -> None:
-    class DynCmd(Command):
-      name = 'dynamic'
-
-    class MyCLI(CLI):
-      def configure_commands(self):
-        return [DynCmd()]
-
-    cli = MyCLI()
-    result = cli.configure_commands()
-    assert len(result) == 1
-    assert result[0].name == 'dynamic'
-
   def test_init_subclass_registers_project(self) -> None:
     key = '_test_register_project'
 
@@ -435,3 +424,30 @@ class TestCLI:
     r = repr(cli)
     assert 'MyCLI' in r
     assert 'leaf' in r
+
+
+class TestDecoratorTypePreservation:
+  def test_subcommand_decorator_preserves_function(self) -> None:
+    @argument('--x', type=int, default=0)
+    @subcommand(name='demo', help_text='demo help')
+    def handler(ctx, args):
+      pass
+
+    decorated = cast(Any, handler)
+    assert callable(decorated)
+    assert decorated.subcommand_meta.name == 'demo'
+    assert len(decorated.subcommand_meta.arguments) == 1
+
+  def test_subcommand_preserves_function_name(self) -> None:
+    @subcommand(name='test')
+    def my_func(ctx, args):
+      pass
+
+    assert my_func.__name__ == 'my_func'
+
+  def test_argument_without_subcommand_raises(self) -> None:
+    with pytest.raises(TypeError, match='@argument must be stacked on top of @subcommand'):
+
+      @argument('--x')
+      def bare(ctx, args):
+        pass

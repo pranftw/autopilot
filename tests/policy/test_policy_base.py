@@ -2,10 +2,11 @@
 
 from autopilot.core.metric import Metric, MetricCollection
 from autopilot.core.models import Result
-from autopilot.core.types import Datum, GateResult
+from autopilot.core.types import Datum, EvalDatum, GateResult
 from autopilot.policy.gates import MinGate
 from autopilot.policy.policy import Policy
 from autopilot.policy.quality_first import QualityFirstMetric
+import pytest
 
 
 class TestPolicyDefaults:
@@ -20,7 +21,7 @@ class TestPolicyDefaults:
 
   def test_default_evaluates_pass(self) -> None:
     r = Result(metrics={'accuracy': 0.9})
-    assert Policy().forward(r) == GateResult.PASS
+    assert Policy().forward(r) == GateResult.PASSED
 
   def test_default_explain(self) -> None:
     r = Result(metrics={})
@@ -32,12 +33,12 @@ class TestPolicyDefaults:
       def forward(self, result: Result) -> GateResult:
         if result.metrics.get('accuracy', 0) < 0.9:
           return GateResult.FAIL
-        return GateResult.PASS
+        return GateResult.PASSED
 
     low = Result(metrics={'accuracy': 0.5})
     high = Result(metrics={'accuracy': 0.95})
     assert Strict().forward(low) == GateResult.FAIL
-    assert Strict().forward(high) == GateResult.PASS
+    assert Strict().forward(high) == GateResult.PASSED
 
 
 class TestMetricDefaults:
@@ -61,6 +62,7 @@ class TestMetricDefaults:
         self._total = 0.0
 
       def update(self, datum: Datum) -> None:
+        assert isinstance(datum, EvalDatum)
         self._total += datum.metrics.get('value', 0.0)
 
       def compute(self) -> dict[str, float]:
@@ -70,11 +72,12 @@ class TestMetricDefaults:
         self._total = 0.0
 
     m = SumMetric()
-    m.update(Datum(metrics={'value': 1.0}, metadata={'split': 'train'}))
-    m.update(Datum(metrics={'value': 2.0}, metadata={'split': 'train'}))
+    m.update(EvalDatum(metrics={'value': 1.0}, metadata={'split': 'train'}))
+    m.update(EvalDatum(metrics={'value': 2.0}, metadata={'split': 'train'}))
     assert m.compute() == {'total': 3.0}
     m.reset()
-    assert m.compute() == {'total': 0.0}
+    with pytest.raises(RuntimeError, match='without prior update'):
+      m.compute()
 
 
 class TestMetricCollection:
@@ -95,6 +98,7 @@ class TestMetricCollection:
 
     composite = A() + B()
     assert isinstance(composite, MetricCollection)
+    composite.update(EvalDatum(metadata={'split': 'train'}))
     assert composite.compute() == {'a': 1.0, 'b': 2.0}
 
   def test_collection_update_delegates(self) -> None:
@@ -112,7 +116,7 @@ class TestMetricCollection:
     c1 = Counter()
     c2 = Counter()
     composite = MetricCollection({'c1': c1, 'c2': c2})
-    composite.update(Datum(metadata={'split': 'train'}))
+    composite.update(EvalDatum(metadata={'split': 'train'}))
     assert c1._count == 1
     assert c2._count == 1
 
@@ -146,35 +150,40 @@ class TestMetricCollection:
         self._count = 0
 
     composite = MetricCollection({'x': CounterA(), 'y': CounterB()})
-    composite.update(Datum(metadata={'split': 'train'}))
+    composite.update(EvalDatum(metadata={'split': 'train'}))
     composite.reset()
-    assert composite.compute() == {'a_count': 0.0, 'b_count': 0.0}
+    with pytest.raises(RuntimeError, match='without prior update'):
+      composite.compute()
 
 
 class TestQualityFirstMetric:
   def test_update_and_compute(self) -> None:
     m = QualityFirstMetric()
-    m.update(Datum(metrics={'accuracy': 0.8}, metadata={'split': 'train'}))
-    m.update(Datum(metrics={'accuracy': 0.6}, metadata={'split': 'train'}))
+    m.update(EvalDatum(metrics={'accuracy': 0.8}, metadata={'split': 'train'}))
+    m.update(EvalDatum(metrics={'accuracy': 0.6}, metadata={'split': 'train'}))
     result = m.compute()
     assert result == {'accuracy': 0.7}
 
   def test_to_result_with_gates(self) -> None:
     m = QualityFirstMetric(gates=[MinGate('accuracy', 0.7)])
-    m.update(Datum(metrics={'accuracy': 0.9}, metadata={'split': 'train'}))
+    m.update(EvalDatum(metrics={'accuracy': 0.9}, metadata={'split': 'train'}))
     r = m.to_result()
     assert r.passed is True
-    assert r.gates['accuracy'] == 'pass'
+    assert len(r.gates) == 1
+    assert r.gates[0].metric == 'accuracy'
+    assert r.gates[0].passed is True
 
   def test_to_result_fails_gate(self) -> None:
     m = QualityFirstMetric(gates=[MinGate('accuracy', 0.9)])
-    m.update(Datum(metrics={'accuracy': 0.5}, metadata={'split': 'train'}))
+    m.update(EvalDatum(metrics={'accuracy': 0.5}, metadata={'split': 'train'}))
     r = m.to_result()
     assert r.passed is False
-    assert r.gates['accuracy'] == 'fail'
+    assert len(r.gates) == 1
+    assert r.gates[0].metric == 'accuracy'
+    assert r.gates[0].passed is False
 
   def test_reset_clears_state(self) -> None:
     m = QualityFirstMetric()
-    m.update(Datum(metrics={'accuracy': 0.8}, metadata={'split': 'train'}))
+    m.update(EvalDatum(metrics={'accuracy': 0.8}, metadata={'split': 'train'}))
     m.reset()
     assert m._accumulated == {}

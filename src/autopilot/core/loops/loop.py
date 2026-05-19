@@ -13,8 +13,9 @@ from typing import Any
 class LoopConfig:
   """Configuration for a single loop run. Built by Trainer.fit().
 
-  Fields:
+  Attributes:
     max_epochs             -- maximum number of epochs
+    min_epoch              -- zero-based first epoch to run (used for checkpoint resume)
     dry_run                -- skip actual computation
     ctx                    -- caller-provided context dict (from fit(ctx=...))
     train_loader           -- training data loader
@@ -28,15 +29,16 @@ class LoopConfig:
   """
 
   max_epochs: int = 10
+  min_epoch: int = 0
   dry_run: bool = False
   ctx: dict[str, Any] | None = None
-  train_loader: Any = None
-  val_loader: Any = None
-  loss: Any = None
-  optimizer: Any = None
+  train_loader: Any | None = None
+  val_loader: Any | None = None
+  loss: Any | None = None
+  optimizer: Any | None = None
   metrics: dict[str, Any] = field(default_factory=dict)
   accumulate_grad_batches: int = 1
-  experiment: Any = None
+  experiment: Any | None = None
   metric_metadata: dict[str, bool] = field(default_factory=dict)
 
 
@@ -44,12 +46,23 @@ class Loop(ABC):
   """Abstract optimization loop. Subclass and override run().
 
   run(trainer, config) -> dict drives the epoch iteration. The returned dict
-  is the loop result passed to experiment.on_loop_complete() and on_loop_end.
+  is the loop result passed to on_loop_end callbacks.
   Built-in: EpochLoop (core/loops/epoch.py), EpochOrchestrator (core/loops/orchestrator.py).
   """
 
   @abstractmethod
-  def run(self, trainer: Any, config: LoopConfig) -> dict[str, Any]: ...
+  def run(self, trainer: Any, config: LoopConfig) -> dict[str, Any]:
+    """Execute the loop for the given trainer and configuration.
+
+    Args:
+      trainer: Trainer owning module, callbacks, and policy.
+      config: Loop configuration for this invocation.
+
+    Returns:
+      Loop result dict consumed by ``on_loop_end`` callbacks.
+    """
+    ...
 
   def __repr__(self) -> str:
+    """Return a simple constructor-style representation."""
     return f'{type(self).__name__}()'

@@ -20,14 +20,16 @@ description: CLI command patterns, global flags, project bootstrap, and workspac
 | `policy` | Policy and scoring inspection |
 | `ai` | AI eval generation and judging (`ai generate`, `ai judge` with run/resume/summarize/distribution) |
 | `report` | Reporting |
-| `promote` | Promotion workflow |
 | `store` | Content-addressed code versioning |
 | `status` | Experiment overview (epoch, metrics, stop reason) |
 | `diagnose` | Trace diagnostics and node heatmaps |
 | `trace` | Collect and inspect computation traces |
 | `propose` | Create, verify, revert, and list proposals |
-| `memory` | Query, record, trends, and context |
-| `agent` | Agent operations (run, list, session) |
+| `tree` | Experiment tree (create, list, show, remove) |
+| `query` | Query experiments, forest, metrics |
+| `checkout` | Check out experiment epochs via store |
+| `stabilize` | Copy accepted parameters to canonical paths |
+| `execute` | Execute Python code/files/modules with tracking |
 
 Omitting a subcommand where required exits with help or error per `argparse` rules. Running `autopilot` with no command prints top-level help and exits 0.
 
@@ -49,6 +51,7 @@ Leaf parsers and inline `@subcommand` parsers pick up shared flags via `make_sub
 | `--no-color` | Disable ANSI color |
 | `--json` | Machine-readable output (see below) |
 | `--expose` | Enable JSON audit trail via `ExposeCollector` |
+| `--context TEXT` | Reason string for mutating commands (required unless command is in the CLI's exempt set) |
 
 ## `--json` behavior
 
@@ -64,6 +67,35 @@ When `--json` is set, `Output` buffers structured messages. `info`, `success`, `
 
 Parse stdout as JSON for scripting; stderr still carries errors in human form unless commands only use `Output`. Use `flush_json` only where a command explicitly ends with buffered rows and no `result` envelope.
 
+## `--context` enforcement
+
+Mutating commands require `--context 'reason'`. Read-only commands in the CLI's exempt set are exempt. Enforcement uses `CLI.requires_context(command)` instance method. Whitespace-only or empty values are rejected identically to omission.
+
+**New commands default to requiring context** unless explicitly added to the exempt set. This is inverted logic: exempt commands are listed, everything else requires context.
+
+Base exempt commands (`_BASE_CONTEXT_EXEMPT` in `cli/command.py`) cover all read-only commands: `query`, `debug`, `status`, `diagnose`, `trace`, `report`, `policy`, `experiment show`, `experiment status`, `experiment compare`, `tree list`, `tree show`, `workspace doctor`, `workspace tree`, `project list`, `propose list`, `store log`, `store status`, `store merge-analysis`, `store merge-preview`, `dataset list`, `dataset show`. Entries must stay aligned with registered command names. Project CLI subclasses extend exemptions via `CLI(context_exempt_commands=frozenset({...}))` constructor parameter which merges with the base set.
+
+**Dual destination (DRY-04):** The `--context` value flows to two separate stores:
+- `ExecutionRecord.context` -- recorded at the dispatch level in `executions.jsonl` (every command invocation).
+- `experiment.add_context(source='user')` -- appended to the experiment's `ContextLog` by handlers via `journal_user_context` (only when an experiment is active).
+
+These are never both written in the same layer. See `CLAUDE.md` for the full architecture.
+
+## Context query commands
+
+```bash
+# inspect experiment decision journal
+autopilot experiment show <id> --context-log
+autopilot experiment show <id> --context-log --context-source policy
+autopilot experiment show <id> --context-log --limit 5
+
+# search execution records by context
+autopilot debug executions list --context-contains 'rollback'
+
+# experiment compare includes context summary
+autopilot experiment compare exp-1 exp-2 --json
+```
+
 ## Standard workspace layout
 
 ```
@@ -77,9 +109,8 @@ workspace/
         trainer.py            # builds Trainer with project Module
         ai/
         experiments/
+          forest.json         # Forest persistence (experiment tree)
           <slug>/
-            manifest.json
-            events.jsonl
             commands.json
         records/
           promotions/

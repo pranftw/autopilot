@@ -2,7 +2,6 @@
 
 from autopilot.core.artifacts.artifact import Artifact, JSONArtifact, JSONLArtifact, TextArtifact
 from autopilot.core.artifacts.experiment import (
-  BaselineArtifact,
   CostArtifact,
   EventsArtifact,
   ReportArtifact,
@@ -12,6 +11,7 @@ from autopilot.core.artifacts.owner import ArtifactOwner
 from autopilot.core.callbacks.callback import Callback
 from autopilot.core.models import Event
 from pathlib import Path
+from typing import Any, cast
 import pytest
 
 
@@ -137,7 +137,9 @@ class TestJSONArtifact:
     a = DeepMerge('data.json')
     a.write({'a': 1}, tmp_path)
     a.update({'b': 2}, tmp_path)
-    assert a.read_raw(tmp_path)['merged'] is True
+    result = a.read_raw(tmp_path)
+    assert result is not None
+    assert cast(dict[str, Any], result)['merged'] is True
 
   def test_mkdir_parents(self, tmp_path: Path) -> None:
     a = JSONArtifact('data.json', scope='epoch')
@@ -246,7 +248,7 @@ class TestEventsArtifact:
 
   def test_validate_invalid_raises(self) -> None:
     a = EventsArtifact()
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match='event requires timestamp and event_type'):
       a.validate({'only_timestamp': '2024-01-01'})
 
   def test_serialize_event_to_dict(self) -> None:
@@ -271,31 +273,12 @@ class TestEventsArtifact:
     assert result[0].event_type == 'created'
 
 
-class TestBaselineArtifact:
-  def test_validate_requires_epoch_and_metrics(self) -> None:
-    a = BaselineArtifact()
-    with pytest.raises(ValueError):
-      a.validate({'only_epoch': 1})
-
-  def test_merge_default_newest_wins(self) -> None:
-    a = BaselineArtifact()
-    old = {'epoch': 1, 'metrics': {'acc': 0.8}}
-    new = {'epoch': 2, 'metrics': {'acc': 0.9}}
-    assert a.merge(old, new) == new
-
-  def test_write_and_read_round_trip(self, tmp_path: Path) -> None:
-    a = BaselineArtifact()
-    a.write({'epoch': 1, 'metrics': {'acc': 0.8}}, tmp_path)
-    result = a.read(tmp_path)
-    assert result['epoch'] == 1
-
-
 class TestRunStateArtifact:
   def test_validate_status_enum(self) -> None:
     a = RunStateArtifact()
     a.validate({'status': 'running'})
-    with pytest.raises(ValueError):
-      a.validate({'status': 'invalid'})
+    with pytest.raises(ValueError, match='status must be one of'):
+      a.validate({'status': 'bogus'})
 
   def test_merge_incremental(self) -> None:
     a = RunStateArtifact()
@@ -339,6 +322,7 @@ class TestReportArtifact:
     a.write('# Start\n', tmp_path)
     a.update('## New Section\n', tmp_path)
     content = a.read_raw(tmp_path)
+    assert content is not None
     assert '# Start' in content
     assert '## New Section' in content
 
@@ -403,8 +387,13 @@ class TestExperimentLevelArtifacts:
 
 
 class SimpleOwner(ArtifactOwner):
+  data: Any
+  a: Any
+  b: Any
+  foo: Any
+
   def __init__(self):
-    self.__init_artifacts__()
+    self.init_artifacts()
 
 
 class TestArtifactOwnerAutoRegistration:
@@ -430,7 +419,7 @@ class TestArtifactOwnerAutoRegistration:
   def test_init_artifacts_idempotent(self):
     owner = SimpleOwner()
     owner.data = JSONArtifact('test.json')
-    owner.__init_artifacts__()
+    owner.init_artifacts()
     assert owner.artifacts == {}
 
   def test_artifacts_property_returns_copy(self):
@@ -458,18 +447,18 @@ class TestArtifactOwnerMRO:
   def test_callback_and_artifact_owner(self):
     class CbOwner(ArtifactOwner, Callback):
       def __init__(self):
-        self.__init_artifacts__()
+        self.init_artifacts()
 
     obj = CbOwner()
     obj.my_artifact = JSONArtifact('test.json')
     assert 'my_artifact' in obj.artifacts
     assert obj.state_dict() == {}
-    obj.on_fit_start(trainer=None)
+    obj.on_fit_start(trainer=None, module=None)
 
   def test_multiple_callbacks_with_artifact_owner(self):
     class Multi(ArtifactOwner, Callback):
       def __init__(self):
-        self.__init_artifacts__()
+        self.init_artifacts()
         self.art1 = JSONArtifact('a.json')
         self.art2 = JSONLArtifact('b.jsonl')
 

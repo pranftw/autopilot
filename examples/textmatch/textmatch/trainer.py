@@ -1,11 +1,10 @@
-from autopilot.ai.store import FileStore
+from autopilot.ai.experiment import AutoPilotExperiment
+from autopilot.ai.store.file_store import FileStore
 from autopilot.core.callbacks.store import StoreCheckpointCallback
-from autopilot.core.checkpoint import JSONCheckpoint
-from autopilot.core.experiment import Experiment
-from autopilot.core.logger import JSONLogger
+from autopilot.core.config import AutoPilotConfig
 from autopilot.core.models import Result
+from autopilot.core.trainer.trainer import Trainer
 from autopilot.core.types import GateResult
-from autopilot.core.trainer import Trainer
 from autopilot.policy.policy import Policy
 from pathlib import Path
 from textmatch.module import TextMatchModule
@@ -19,14 +18,20 @@ class AccuracyPolicy(Policy):
   def name(self) -> str:
     return 'AccuracyPolicy'
 
+  def _resolve_accuracy(self, metrics: dict[str, float]) -> float:
+    """Resolve accuracy from both prefixed and unprefixed metric keys."""
+    if 'val_accuracy' in metrics:
+      return metrics['val_accuracy']
+    return metrics.get('accuracy', 0.0)
+
   def forward(self, result: Result) -> GateResult:
-    accuracy = result.metrics.get('accuracy', 0.0)
+    accuracy = self._resolve_accuracy(result.metrics)
     if accuracy >= self._threshold:
-      return GateResult.PASS
+      return GateResult.PASSED
     return GateResult.FAIL
 
   def explain(self, result: Result) -> str:
-    accuracy = result.metrics.get('accuracy', 0.0)
+    accuracy = self._resolve_accuracy(result.metrics)
     return f'accuracy={accuracy:.2%}, threshold={self._threshold:.2%}'
 
 
@@ -35,7 +40,8 @@ def next_slug(store_path: Path) -> str:
   if not refs_file.exists():
     return 'run-1'
   refs = json.loads(refs_file.read_text(encoding='utf-8'))
-  existing = [k for k in refs if k.startswith('run-') and k != 'HEAD']
+  branches = refs.get('branches', {})
+  existing = [k for k in branches if k.startswith('run-')]
   return f'run-{len(existing) + 1}'
 
 
@@ -43,24 +49,23 @@ def build_trainer(
   module: TextMatchModule,
   store_path: Path,
   dry_run: bool = False,
-  experiment_dir: Path | None = None,
+  threshold: float = 0.30,
+  accumulate_grad_batches: int = 100,
+  experiment_slug: str | None = None,
 ) -> tuple[Trainer, FileStore]:
-  slug = next_slug(store_path)
-  store = FileStore(store_path, slug, list(module.parameters()))
-  policy = AccuracyPolicy(threshold=0.30)
-  exp_dir = experiment_dir or store_path / slug
-  experiment = Experiment(
-    exp_dir,
-    slug=slug,
-    logger=JSONLogger(exp_dir),
-    checkpoint=JSONCheckpoint(),
-    store=store,
-  )
+  slug = experiment_slug or next_slug(store_path)
+  config = AutoPilotConfig(workspace=store_path.parent)
+  config.store_path = store_path
+  store = FileStore(config)
+  store.register_parameters(dict(module.named_parameters()))
+  policy = AccuracyPolicy(threshold=threshold)
+  experiment = AutoPilotExperiment(experiment_id=slug)
   trainer = Trainer(
     callbacks=[StoreCheckpointCallback()],
     policy=policy,
     experiment=experiment,
+    store=store,
     dry_run=dry_run,
-    accumulate_grad_batches=100,
+    accumulate_grad_batches=accumulate_grad_batches,
   )
   return trainer, store

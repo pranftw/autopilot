@@ -14,7 +14,7 @@ class ExperimentError(AutoPilotError):
 
 
 class TrackingError(AutoPilotError):
-  """Manifest, event, or artifact tracking failure."""
+  """Event, artifact, or experiment tracking failure."""
 
 
 class StoreError(AutoPilotError):
@@ -25,6 +25,11 @@ class PreflightError(AutoPilotError):
   """Preflight check failure preventing operation."""
 
   def __init__(self, failures: list[str]) -> None:
+    """Build error listing each failed preflight check.
+
+    Args:
+      failures: Human-readable failure messages joined into the exception text.
+    """
     self.failures = failures
     super().__init__(f'preflight failed with {len(failures)} issue(s): ' + '; '.join(failures))
 

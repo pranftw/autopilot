@@ -2,7 +2,7 @@
 
 from autopilot.ai.evaluation.generator import GeneratorAgent, stratify_by
 from autopilot.ai.evaluation.judge import JudgeAgent
-from autopilot.ai.evaluation.schemas import RetryConfig, RunConfig
+from autopilot.ai.evaluation.schemas import RunConfig
 from autopilot.ai.evaluation.steps import (
   BackStep,
   LLMStep,
@@ -17,7 +17,8 @@ from autopilot.ai.evaluation.steps import (
 )
 from autopilot.core.errors import AIError
 from pydantic import BaseModel
-from typing import Any
+from tests.doubles import make_run_config
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
@@ -28,23 +29,6 @@ class DummyOutput(BaseModel):
 
 class DummyOutput2(BaseModel):
   score: int
-
-
-def _make_run_config() -> RunConfig:
-  return RunConfig(
-    model='test-model',
-    num_parallel=1,
-    max_rpm=100,
-    rpm_safety_margin=1.0,
-    retry=RetryConfig(
-      max_retries=1,
-      min_timeout_ms=100,
-      max_timeout_ms=1000,
-      backoff_factor=2,
-    ),
-    max_tool_steps=5,
-    max_output_tokens=1024,
-  )
 
 
 # Helper to create a mock Agent that returns a given output
@@ -58,8 +42,8 @@ def _mock_agent_factory(outputs: dict[str, BaseModel]):
 
     async def mock_run(*args, **run_kwargs):
       # Find the output for this output_type
-      for _name, output in outputs.items():
-        if isinstance(output, output_type):
+      for output in outputs.values():
+        if output_type is not None and isinstance(output, output_type):
           result = MagicMock()
           result.output = output
           return result
@@ -124,6 +108,20 @@ class TestPythonStep:
     step = PythonStep('p', fn)
     assert step.fn({'key': 'val'}) == {'echo': 'val'}
 
+  def test_async_callback_rejected(self) -> None:
+    async def async_fn(ctx: dict) -> dict:
+      return {}
+
+    with pytest.raises(TypeError, match='PythonStep callback must be sync, got async'):
+      PythonStep('bad', cast(Any, async_fn))
+
+  def test_sync_callback_accepted(self) -> None:
+    def sync_fn(ctx: dict) -> dict:
+      return {}
+
+    step = PythonStep('ok', sync_fn)
+    assert step.fn is sync_fn
+
 
 class TestBackStep:
   def test_stores_target(self) -> None:
@@ -164,7 +162,7 @@ class TestRunStepWorkflow:
       PythonStep('first', lambda c: {'a': 1}),
       PythonStep('second', lambda c: {'sum': c['first']['a'] + 1}),
     ]
-    ctx = await run_step_workflow(steps, {}, 'test-model', _make_run_config())
+    ctx = await run_step_workflow(steps, {}, 'test-model', make_run_config())
     assert ctx['first'] == {'a': 1}
     assert ctx['second'] == {'sum': 2}
 
@@ -178,7 +176,7 @@ class TestRunStepWorkflow:
     mock_agent_cls.return_value = mock_agent_instance
 
     steps = [LLMStep('gen', output_type=DummyOutput, instructions='do it')]
-    ctx = await run_step_workflow(steps, {}, 'test-model', _make_run_config())
+    ctx = await run_step_workflow(steps, {}, 'test-model', make_run_config())
     assert ctx['gen'].value == 'test'
     mock_agent_cls.assert_called_once()
 
@@ -198,7 +196,7 @@ class TestRunStepWorkflow:
       PythonStep('setup', lambda c: {'x': 1}),
       LLMStep('gen', output_type=DummyOutput, instructions_fn=instr_fn),
     ]
-    ctx = await run_step_workflow(steps, {}, 'm', _make_run_config())
+    ctx = await run_step_workflow(steps, {}, 'm', make_run_config())
     assert ctx['gen'].value == 'dyn'
     _, kwargs = mock_agent_cls.call_args
     assert kwargs['instructions'] == 'prefix:1'
@@ -218,7 +216,7 @@ class TestRunStepWorkflow:
         lambda c: c.get('counter', {}).get('n', 0) < 2,
       ),
     ]
-    ctx = await run_step_workflow(steps, {}, 'm', _make_run_config())
+    ctx = await run_step_workflow(steps, {}, 'm', make_run_config())
     assert ctx['counter']['n'] == 2
     assert ctx['back_iterations'] == 1
 
@@ -233,7 +231,7 @@ class TestRunStepWorkflow:
         max_iterations=2,
       ),
     ]
-    ctx = await run_step_workflow(steps, {}, 'm', _make_run_config())
+    ctx = await run_step_workflow(steps, {}, 'm', make_run_config())
     assert ctx['back_iterations'] == 2
 
   @pytest.mark.asyncio
@@ -243,7 +241,7 @@ class TestRunStepWorkflow:
       BackStep('back', 'a', lambda c: False),
       PythonStep('tail', lambda c: {'done': True}),
     ]
-    ctx = await run_step_workflow(steps, {}, 'm', _make_run_config())
+    ctx = await run_step_workflow(steps, {}, 'm', make_run_config())
     assert ctx['tail'] == {'done': True}
     assert 'back_iterations' not in ctx
 
@@ -251,7 +249,7 @@ class TestRunStepWorkflow:
   async def test_backstep_target_not_found(self) -> None:
     steps = [BackStep('back', 'missing', lambda c: True)]
     with pytest.raises(AIError, match='not found'):
-      await run_step_workflow(steps, {}, 'm', _make_run_config())
+      await run_step_workflow(steps, {}, 'm', make_run_config())
 
   @pytest.mark.asyncio
   async def test_backstep_iteration_counter(self) -> None:
@@ -266,28 +264,29 @@ class TestRunStepWorkflow:
         lambda c: c.get('counter', {}).get('n', 0) < 2,
       ),
     ]
-    ctx = await run_step_workflow(steps, {}, 'm', _make_run_config())
+    ctx = await run_step_workflow(steps, {}, 'm', make_run_config())
     assert ctx['back_iterations'] == 1
 
   @pytest.mark.asyncio
   async def test_empty_steps(self) -> None:
-    ctx = await run_step_workflow([], {'a': 1}, 'm', _make_run_config())
+    ctx = await run_step_workflow([], {'a': 1}, 'm', make_run_config())
     assert ctx == {'a': 1}
 
   @pytest.mark.asyncio
   async def test_single_python_step(self) -> None:
     steps = [PythonStep('only', lambda c: {'x': 1})]
-    ctx = await run_step_workflow(steps, {}, 'm', _make_run_config())
+    ctx = await run_step_workflow(steps, {}, 'm', make_run_config())
     assert ctx['only'] == {'x': 1}
 
   @pytest.mark.asyncio
   async def test_python_step_exception_propagates(self) -> None:
     def boom(_ctx: dict) -> dict:
-      raise ValueError('fail')
+      msg = 'fail'
+      raise ValueError(msg)
 
     steps = [PythonStep('bad', boom)]
     with pytest.raises(ValueError, match='fail'):
-      await run_step_workflow(steps, {}, 'm', _make_run_config())
+      await run_step_workflow(steps, {}, 'm', make_run_config())
 
   @pytest.mark.asyncio
   @patch('autopilot.ai.evaluation.steps.Agent')
@@ -300,7 +299,7 @@ class TestRunStepWorkflow:
 
     tools = [lambda: None]
     steps = [LLMStep('gen', DummyOutput, instructions='x', tools=tools)]
-    ctx = await run_step_workflow(steps, {}, 'test-model', _make_run_config())
+    ctx = await run_step_workflow(steps, {}, 'test-model', make_run_config())
     assert ctx['gen'].value == 'with-tools'
     _, kwargs = mock_agent_cls.call_args
     assert kwargs['tools'] is tools
@@ -319,14 +318,14 @@ class TestLLMStepDecorator:
     def generate(self, ctx):
       return ''
 
-    assert hasattr(generate, '_step_meta')
+    assert hasattr(generate, 'step_meta')
 
   def test_meta_has_correct_fields(self) -> None:
     @llm_step('gen', output_type=_DecoratorOutput, instructions='do it')
     def generate(self, ctx):
       return ''
 
-    meta = generate._step_meta
+    meta = cast(Any, generate).step_meta
     assert meta.kind == 'llm'
     assert meta.name == 'gen'
     assert meta.output_type is _DecoratorOutput
@@ -339,8 +338,9 @@ class TestPythonStepDecorator:
     def execute(self, ctx):
       return {}
 
-    assert execute._step_meta.kind == 'python'
-    assert execute._step_meta.name == 'exec'
+    execute_any = cast(Any, execute)
+    assert execute_any.step_meta.kind == 'python'
+    assert execute_any.step_meta.name == 'exec'
 
 
 class TestBackStepDecorator:
@@ -349,7 +349,7 @@ class TestBackStepDecorator:
     def should_retry(self, ctx):
       return False
 
-    meta = should_retry._step_meta
+    meta = cast(Any, should_retry).step_meta
     assert meta.kind == 'back'
     assert meta.target == 'gen'
     assert meta.max_iterations == 5
@@ -359,7 +359,7 @@ class TestBackStepDecorator:
     def should_retry(self, ctx):
       return False
 
-    assert should_retry._step_meta.max_iterations == 3
+    assert cast(Any, should_retry).step_meta.max_iterations == 3
 
 
 class _StubGen:
@@ -377,6 +377,26 @@ class _StubGen:
 
   def undecorated(self):
     pass
+
+
+class _ParentAgent:
+  @python_step('parent_step')
+  def parent_handler(self, ctx):
+    return {'from': 'parent'}
+
+  @llm_step('shared_step', output_type=_DecoratorOutput)
+  def shared_handler(self, ctx):
+    return 'parent version'
+
+
+class _ChildAgent(_ParentAgent):
+  @python_step('child_step')
+  def child_handler(self, ctx):
+    return {'from': 'child'}
+
+  @llm_step('shared_step', output_type=_DecoratorOutput)
+  def shared_handler(self, ctx):
+    return 'child version'
 
 
 class TestCollectSteps:
@@ -412,6 +432,30 @@ class TestCollectSteps:
     names = [s.name for s in steps]
     assert 'undecorated' not in names
 
+  def test_inherited_steps_visible_to_child(self) -> None:
+    """Parent class @step methods are collected via MRO traversal."""
+    steps = collect_steps(_ChildAgent())
+    names = [s.name for s in steps]
+    assert 'parent_step' in names
+    assert 'child_step' in names
+
+  def test_child_overrides_parent_step_same_name(self) -> None:
+    """First occurrence in MRO wins (child overrides parent)."""
+    steps = collect_steps(_ChildAgent())
+    shared = [s for s in steps if s.name == 'shared_step']
+    assert len(shared) == 1
+
+  def test_parent_only_steps_collected(self) -> None:
+    """A child with no own steps still gets parent's steps."""
+
+    class ChildNoSteps(_ParentAgent):
+      pass
+
+    steps = collect_steps(ChildNoSteps())
+    names = [s.name for s in steps]
+    assert 'parent_step' in names
+    assert 'shared_step' in names
+
 
 class TestStratifyBy:
   def test_simple_fields(self) -> None:
@@ -421,7 +465,7 @@ class TestStratifyBy:
 
     item = type('Item', (), {'custom': type('C', (), {'domain': 'math'})()})()
     gen = Gen()
-    assert gen.stratify_key(item) == 'math'
+    assert gen.stratify_key(cast(Any, item)) == 'math'
 
   def test_dict_field_access(self) -> None:
     @stratify_by('domain', 'difficulty')
@@ -430,7 +474,7 @@ class TestStratifyBy:
 
     item = type('Item', (), {'custom': {'domain': 'math', 'difficulty': 'hard'}})()
     gen = Gen()
-    assert gen.stratify_key(item) == 'math:hard'
+    assert gen.stratify_key(cast(Any, item)) == 'math:hard'
 
   def test_dotted_field_paths(self) -> None:
     @stratify_by('metadata.level')
@@ -439,7 +483,7 @@ class TestStratifyBy:
 
     item = type('Item', (), {'custom': {'metadata': {'level': 'expert'}}})()
     gen = Gen()
-    assert gen.stratify_key(item) == 'expert'
+    assert gen.stratify_key(cast(Any, item)) == 'expert'
 
 
 class TestDefineStepsIntegration:
@@ -454,7 +498,7 @@ class TestDefineStepsIntegration:
         return {}
 
     g = MyGen()
-    steps = g.define_steps(None)
+    steps = g.define_steps(cast(Any, None))
     assert len(steps) == 2
     assert steps[0].name == 'gen'
 
@@ -463,7 +507,7 @@ class TestDefineStepsIntegration:
       pass
 
     with pytest.raises(NotImplementedError):
-      EmptyGen().define_steps(None)
+      EmptyGen().define_steps(cast(Any, None))
 
   def test_override_define_steps_takes_precedence(self) -> None:
     class CustomGen(GeneratorAgent):
@@ -475,7 +519,7 @@ class TestDefineStepsIntegration:
         return [PythonStep('custom', fn=lambda ctx: {})]
 
     g = CustomGen()
-    steps = g.define_steps(None)
+    steps = g.define_steps(cast(Any, None))
     assert len(steps) == 1
     assert steps[0].name == 'custom'
 
@@ -486,7 +530,7 @@ class TestDefineStepsIntegration:
         return ''
 
     j = MyJudge()
-    steps = j.define_steps(None)
+    steps = j.define_steps(cast(Any, None))
     assert len(steps) == 1
     assert steps[0].name == 'judge'
 
@@ -499,20 +543,20 @@ class TestStepExecuteBase:
   async def test_step_execute_base_raises(self) -> None:
     step = Step('base')
     with pytest.raises(NotImplementedError):
-      await step.execute({}, 'model', _make_run_config())
+      await step.execute({}, 'model', make_run_config())
 
 
 class TestPythonStepExecute:
   @pytest.mark.asyncio
   async def test_python_step_execute_runs_fn(self) -> None:
     step = PythonStep('py', lambda c: {'result': c.get('input', 0) + 1})
-    result = await step.execute({'input': 5}, 'model', _make_run_config())
+    result = await step.execute({'input': 5}, 'model', make_run_config())
     assert result == {'result': 6}
 
   @pytest.mark.asyncio
   async def test_python_step_execute_returns_result(self) -> None:
-    step = PythonStep('py', lambda c: 'string result')
-    result = await step.execute({}, 'model', _make_run_config())
+    step = PythonStep('py', cast(Any, lambda c: 'string result'))
+    result = await step.execute({}, 'model', make_run_config())
     assert result == 'string result'
 
 
@@ -527,7 +571,7 @@ class TestLLMStepExecute:
     mock_agent_cls.return_value = mock_agent_instance
 
     step = LLMStep('gen', output_type=DummyOutput, instructions='do it')
-    result = await step.execute({}, 'test-model', _make_run_config())
+    result = await step.execute({}, 'test-model', make_run_config())
     assert result.value == 'test'
     mock_agent_cls.assert_called_once()
 
@@ -536,21 +580,21 @@ class TestBackStepExecute:
   @pytest.mark.asyncio
   async def test_back_step_execute_returns_loopback_when_condition_true(self) -> None:
     step = BackStep('back', 'target', lambda c: True)
-    result = await step.execute({}, 'model', _make_run_config())
+    result = await step.execute({}, 'model', make_run_config())
     assert isinstance(result, StepLoopback)
     assert result.target_name == 'target'
 
   @pytest.mark.asyncio
   async def test_back_step_execute_returns_none_when_condition_false(self) -> None:
     step = BackStep('back', 'target', lambda c: False)
-    result = await step.execute({}, 'model', _make_run_config())
+    result = await step.execute({}, 'model', make_run_config())
     assert result is None
 
   @pytest.mark.asyncio
   async def test_back_step_execute_returns_none_at_max_iterations(self) -> None:
     step = BackStep('back', 'target', lambda c: True, max_iterations=2)
     ctx = {'back_iterations': 2}
-    result = await step.execute(ctx, 'model', _make_run_config())
+    result = await step.execute(ctx, 'model', make_run_config())
     assert result is None
 
 
@@ -580,14 +624,14 @@ class TestCustomStepExecute:
       PythonStep('setup', lambda c: {'ready': True}),
       CustomStep('custom'),
     ]
-    ctx = await run_step_workflow(steps, {}, 'model', _make_run_config())
+    ctx = await run_step_workflow(steps, {}, 'model', make_run_config())
     assert ctx['custom'] == {'custom': True, 'input_count': 1}
 
   @pytest.mark.asyncio
   async def test_backstep_target_not_found_raises(self) -> None:
     steps = [BackStep('back', 'missing', lambda c: True)]
     with pytest.raises(AIError, match='not found'):
-      await run_step_workflow(steps, {}, 'm', _make_run_config())
+      await run_step_workflow(steps, {}, 'm', make_run_config())
 
   @pytest.mark.asyncio
   async def test_backstep_loopback_in_workflow(self) -> None:
@@ -603,7 +647,7 @@ class TestCustomStepExecute:
         max_iterations=5,
       ),
     ]
-    ctx = await run_step_workflow(steps, {}, 'm', _make_run_config())
+    ctx = await run_step_workflow(steps, {}, 'm', make_run_config())
     assert ctx['counter']['n'] == 3
     assert ctx['back_iterations'] == 2
 
@@ -613,5 +657,52 @@ class TestCustomStepExecute:
       PythonStep('counter', lambda c: {'n': 1}),
       BackStep('back', 'counter', lambda c: True, max_iterations=2),
     ]
-    ctx = await run_step_workflow(steps, {}, 'm', _make_run_config())
+    ctx = await run_step_workflow(steps, {}, 'm', make_run_config())
     assert ctx['back_iterations'] == 2
+
+
+class TestStepDecoratorMetadata:
+  def test_llm_step_decorator_collects_metadata(self) -> None:
+    @llm_step('gen', output_type=DummyOutput, instructions='do it')
+    def generate(self, context):
+      return context
+
+    assert hasattr(generate, 'step_meta')
+    assert generate.step_meta.kind == 'llm'
+    assert generate.step_meta.name == 'gen'
+    assert generate.step_meta.output_type is DummyOutput
+    assert generate.step_meta.instructions == 'do it'
+
+  def test_python_step_decorator_collects_metadata(self) -> None:
+    @python_step('check')
+    def checker(self, context):
+      return context
+
+    assert hasattr(checker, 'step_meta')
+    assert checker.step_meta.kind == 'python'
+    assert checker.step_meta.name == 'check'
+
+  def test_back_step_decorator_collects_metadata(self) -> None:
+    @back_step('retry', target='gen', max_iterations=5)
+    def retrier(self, context):
+      return True
+
+    assert hasattr(retrier, 'step_meta')
+    assert retrier.step_meta.kind == 'back'
+    assert retrier.step_meta.name == 'retry'
+    assert retrier.step_meta.target == 'gen'
+    assert retrier.step_meta.max_iterations == 5
+
+  def test_llm_step_preserves_function_name(self) -> None:
+    @llm_step('s', output_type=DummyOutput)
+    def my_step(self, ctx):
+      pass
+
+    assert my_step.__name__ == 'my_step'
+
+  def test_python_step_preserves_function_name(self) -> None:
+    @python_step('s')
+    def my_step(self, ctx):
+      pass
+
+    assert my_step.__name__ == 'my_step'

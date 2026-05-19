@@ -1,6 +1,12 @@
 """Integration tests for the full gradient pipeline.
 
-Tests end-to-end wiring: JudgeLoss -> GradientCollator -> param.grad -> AgentOptimizer.
+Tests end-to-end wiring: Module -> JudgeLoss -> graph.backward() -> AccumulateGrad
+-> param.grad -> AgentOptimizer.
+
+Loss.backward() now seeds the computation graph via get_current_graph().backward()
+instead of directly assigning param.grad. Tests that exercise backward() must use
+Module.__call__ (which records the graph via ModuleCallOperator) so that data has
+grad_fn.
 """
 
 from autopilot.ai.agents.agent import AgentResult
@@ -13,17 +19,16 @@ from autopilot.ai.gradient import (
 from autopilot.ai.loss import JudgeLoss
 from autopilot.ai.optimizer import AgentOptimizer
 from autopilot.core.callbacks.callback import Callback
-from autopilot.core.gradient import Gradient
+from autopilot.core.gradient import Gradient, NumericGradient
 from autopilot.core.loss import Loss
-from autopilot.core.module import AutoPilotModule
+from autopilot.core.module.autopilot_module import AutoPilotModule
 from autopilot.core.optimizer import Optimizer
 from autopilot.core.parameter import Parameter
-from autopilot.core.trainer import Trainer
-from autopilot.core.types import Datum
+from autopilot.core.trainer.trainer import Trainer
+from autopilot.core.types import Datum, EvalDatum
 from autopilot.data.dataloader import DataLoader
 from dataclasses import dataclass, field
-from helpers import NumericGradient
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 # helpers
@@ -31,7 +36,7 @@ from unittest.mock import MagicMock
 
 def _loader(n: int) -> DataLoader:
   return DataLoader(
-    [Datum(feedback=f'fb_{i}', metadata={'i': i}) for i in range(n)],
+    [EvalDatum(feedback=f'fb_{i}', metadata={'i': i}) for i in range(n)],
     batch_size=1,
   )
 
@@ -52,6 +57,63 @@ def _mock_agent(output: str = 'applied') -> MagicMock:
   agent.run.return_value = AgentResult(output=output)
   agent.limiter = None
   return agent
+
+
+@dataclass
+class _PipelineRuleGrad(Gradient):
+  """Semantic gradient carrying string issues for programmatic path tests."""
+
+  issues: list[str] = field(default_factory=list)
+
+  def accumulate(self, other: Gradient) -> Gradient:
+    if not isinstance(other, _PipelineRuleGrad):
+      msg = (
+        f'Cannot accumulate {type(self).__name__} with {type(other).__name__}. '
+        f'Insert a conversion operator to coerce types before fan-in.'
+      )
+      raise TypeError(msg)
+    return _PipelineRuleGrad(issues=self.issues + other.issues)
+
+  def render(self) -> str:
+    return '\n'.join(self.issues)
+
+
+class _PipelineRuleLoss(Loss):
+  """Loss that aggregates feedback into a _PipelineRuleGrad seed."""
+
+  def __init__(self, parameters: list[Parameter]) -> None:
+    super().__init__(parameters)
+    self._issues: list[str] = []
+
+  def forward(self, data, targets=None):
+    super().forward(data, targets)
+    target = targets
+    if isinstance(target, Datum) and target.items:
+      target = target.items[0]
+    if isinstance(target, EvalDatum) and not target.success:
+      self._issues.append(target.feedback)
+
+  def compute_seed_gradient(self):
+    return _PipelineRuleGrad(issues=list(self._issues))
+
+  def reset(self):
+    super().reset()
+    self._issues = []
+
+
+class _PipelineRuleOpt(Optimizer):
+  """Optimizer that records merged rule-gradient issues into a sink list."""
+
+  def __init__(self, params: list[Parameter], applied_issues: list[list[str]]) -> None:
+    super().__init__(params)
+    self._applied_issues = applied_issues
+
+  def step(self):
+    self._applied_issues.extend(
+      cast(_PipelineRuleGrad, param.grad).issues
+      for param in self.parameters
+      if param.requires_grad and param.grad is not None
+    )
 
 
 # test 1: judgeloss + collator -> agentoptimizer
@@ -80,13 +142,13 @@ class TestJudgeLossCollatorToAgentOptimizer:
         self.p1 = p1
         self.p2 = p2
         self.loss = JudgeLoss(judge, collator, [p1, p2])
-        self._opt = AgentOptimizer(opt_agent, [p1, p2])
+        self._opt = AgentOptimizer(opt_agent, [p1, p2], agentic=False)
 
       def forward(self, batch):
         return batch
 
-      def training_step(self, batch):
-        return batch
+      def training_step(self, batch, batch_idx):
+        return self(batch)
 
       def configure_optimizers(self):
         return self._opt
@@ -102,8 +164,8 @@ class TestJudgeLossCollatorToAgentOptimizer:
     prompt = opt_agent.run.call_args[0][0]
     assert 'rules file' in prompt
     assert 'config file' in prompt
-    assert 'What to change: add rules' in prompt
-    assert 'What to change: update config' in prompt
+    assert 'add rules' in prompt
+    assert 'update config' in prompt
 
 
 # test 2: programmatic gradient path (no llm)
@@ -111,41 +173,7 @@ class TestJudgeLossCollatorToAgentOptimizer:
 
 class TestProgrammaticGradientPathNoLLM:
   def test_rule_gradient_no_collator(self):
-    @dataclass
-    class _RuleGrad(Gradient):
-      issues: list[str] = field(default_factory=list)
-
-      def accumulate(self, other: '_RuleGrad') -> '_RuleGrad':
-        return _RuleGrad(issues=self.issues + other.issues)
-
-      def render(self) -> str:
-        return '\n'.join(self.issues)
-
-    class _RuleLoss(Loss):
-      def __init__(self, params):
-        super().__init__(params)
-        self._issues: list[str] = []
-
-      def forward(self, data, targets=None):
-        if not data.success:
-          self._issues.append(data.feedback)
-
-      def backward(self):
-        grad = _RuleGrad(issues=list(self._issues))
-        for p in self._loss_parameters:
-          if p.requires_grad:
-            p.grad = grad
-
-      def reset(self):
-        self._issues = []
-
     applied_issues: list[list[str]] = []
-
-    class _RuleOpt(Optimizer):
-      def step(self):
-        for p in self._parameters:
-          if p.requires_grad and p.grad is not None:
-            applied_issues.append(p.grad.issues)
 
     p = Parameter(requires_grad=True)
 
@@ -153,22 +181,22 @@ class TestProgrammaticGradientPathNoLLM:
       def __init__(self):
         super().__init__()
         self.param = p
-        self.loss = _RuleLoss([p])
-        self._opt = _RuleOpt([p])
+        self.loss = _PipelineRuleLoss([p])
+        self._opt = _PipelineRuleOpt([p], applied_issues)
 
       def forward(self, batch):
         return batch
 
-      def training_step(self, batch):
-        return batch
+      def training_step(self, batch, batch_idx):
+        return self(batch)
 
       def configure_optimizers(self):
         return self._opt
 
     data = [
-      Datum(success=False, feedback='missing pattern A'),
-      Datum(success=True),
-      Datum(success=False, feedback='wrong category B'),
+      EvalDatum(success=False, feedback='missing pattern A'),
+      EvalDatum(success=True),
+      EvalDatum(success=False, feedback='wrong category B'),
     ]
     mod = _Mod()
     trainer = Trainer(accumulate_grad_batches=3)
@@ -203,8 +231,8 @@ class TestLossAccumulationWindow:
       def forward(self, batch):
         return batch
 
-      def training_step(self, batch):
-        return batch
+      def training_step(self, batch, batch_idx):
+        return self(batch)
 
       def configure_optimizers(self):
         return self._opt
@@ -224,9 +252,9 @@ class TestLossAccumulationWindow:
 
 
 class _CollationContextCallback(Callback):
-  def on_after_backward(self, trainer: Any) -> None:
+  def on_after_backward(self, trainer: Any, module: Any) -> None:
     loss_fn = next(
-      (m for m in trainer.module.modules() if isinstance(m, JudgeLoss)),
+      (m for m in trainer.module.modules() if isinstance(m, Loss)),
       None,
     )
     if loss_fn and loss_fn.gradients:
@@ -251,13 +279,13 @@ class TestCollationContextFlowsToOptimizer:
         super().__init__()
         self.param = p
         self.loss = JudgeLoss(judge, collator, [p])
-        self._opt = AgentOptimizer(opt_agent, [p])
+        self._opt = AgentOptimizer(opt_agent, [p], agentic=False)
 
       def forward(self, batch):
         return batch
 
-      def training_step(self, batch):
-        return batch
+      def training_step(self, batch, batch_idx):
+        return self(batch)
 
       def configure_optimizers(self):
         return self._opt
@@ -288,13 +316,13 @@ class TestConcatCollatorEndToEnd:
         self.p1 = p1
         self.p2 = p2
         self.loss = JudgeLoss(judge, ConcatCollator(), [p1, p2])
-        self._opt = AgentOptimizer(opt_agent, [p1, p2])
+        self._opt = AgentOptimizer(opt_agent, [p1, p2], agentic=False)
 
       def forward(self, batch):
         return batch
 
-      def training_step(self, batch):
-        return batch
+      def training_step(self, batch, batch_idx):
+        return self(batch)
 
       def configure_optimizers(self):
         return self._opt
@@ -327,13 +355,13 @@ class TestCollationContextWithRealConcatCollator:
         super().__init__()
         self.param = p
         self.loss = JudgeLoss(judge, ConcatCollator(), [p])
-        self._opt = AgentOptimizer(opt_agent, [p])
+        self._opt = AgentOptimizer(opt_agent, [p], agentic=False)
 
       def forward(self, batch):
         return batch
 
-      def training_step(self, batch):
-        return batch
+      def training_step(self, batch, batch_idx):
+        return self(batch)
 
       def configure_optimizers(self):
         return self._opt
@@ -362,23 +390,30 @@ class TestZeroGradBackwardStepSequence:
     judge = MagicMock()
     opt_agent = _mock_agent()
 
-    opt = AgentOptimizer(opt_agent, [p])
-    loss = JudgeLoss(judge, collator, [p])
+    class _Mod(AutoPilotModule):
+      def __init__(self):
+        super().__init__()
+        self.param = p
+        self.loss = JudgeLoss(judge, collator, [p])
+        self._opt = AgentOptimizer(opt_agent, [p], agentic=False)
 
-    opt.zero_grad()
+      def forward(self, batch):
+        return batch
+
+      def training_step(self, batch, batch_idx):
+        return self(batch)
+
+      def configure_optimizers(self):
+        return self._opt
+
+    mod = _Mod()
+    trainer = Trainer(accumulate_grad_batches=1)
+    trainer.fit(mod, train_dataloaders=_loader(1), max_epochs=1)
+
+    opt_agent.run.assert_called_once()
+    prompt = opt_agent.run.call_args[0][0]
+    assert 'What to change: fix' in prompt
     assert p.grad is None
-
-    loss.forward(Datum(feedback='f'))
-    loss.backward()
-    assert p.grad is not None
-    assert isinstance(p.grad, TextGradient)
-
-    opt.step()
-    assert p.grad is None
-
-    opt_agent.reset_mock()
-    opt.step()
-    opt_agent.run.assert_not_called()
 
 
 # test 8: no callback means no collation context
@@ -400,13 +435,13 @@ class TestNoCallbackMeansNoCollationContext:
         super().__init__()
         self.param = p
         self.loss = JudgeLoss(judge, collator, [p])
-        self._opt = AgentOptimizer(opt_agent, [p])
+        self._opt = AgentOptimizer(opt_agent, [p], agentic=False)
 
       def forward(self, batch):
         return batch
 
-      def training_step(self, batch):
-        return batch
+      def training_step(self, batch, batch_idx):
+        return self(batch)
 
       def configure_optimizers(self):
         return self._opt
@@ -428,9 +463,11 @@ class TestProgrammaticGradientNoCollatorNoAgent:
 
     class _NumOpt(Optimizer):
       def step(self):
-        for p in self._parameters:
-          if p.requires_grad and p.grad is not None:
-            recorded_values.append(p.grad.value)
+        recorded_values.extend(
+          cast(NumericGradient, param.grad).value
+          for param in self.parameters
+          if param.requires_grad and param.grad is not None
+        )
 
     class _NumLoss(Loss):
       def __init__(self, params):
@@ -438,14 +475,14 @@ class TestProgrammaticGradientNoCollatorNoAgent:
         self._count = 0
 
       def forward(self, data, targets=None):
+        super().forward(data, targets)
         self._count += 1
 
-      def backward(self):
-        for p in self._loss_parameters:
-          if p.requires_grad:
-            p.grad = NumericGradient(value=float(self._count))
+      def compute_seed_gradient(self):
+        return NumericGradient(value=float(self._count))
 
       def reset(self):
+        super().reset()
         self._count = 0
 
     p = Parameter(requires_grad=True)
@@ -460,8 +497,8 @@ class TestProgrammaticGradientNoCollatorNoAgent:
       def forward(self, batch):
         return batch
 
-      def training_step(self, batch):
-        return batch
+      def training_step(self, batch, batch_idx):
+        return self(batch)
 
       def configure_optimizers(self):
         return self._opt

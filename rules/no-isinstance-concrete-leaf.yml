@@ -1,0 +1,17 @@
+id: no-isinstance-concrete-leaf
+language: Python
+severity: error
+message: "Do not use isinstance() on concrete leaf types. Use base class checks or duck typing instead (PHILOSOPHY.md)."
+rule:
+  any:
+    - pattern: isinstance($OBJ, ClaudeCodeAgent)
+    - pattern: isinstance($OBJ, FileStore)
+    - pattern: isinstance($OBJ, AgentOptimizer)
+    - pattern: isinstance($OBJ, JudgeLoss)
+    - pattern: isinstance($OBJ, AutoPilotExperiment)
+    - pattern: isinstance($OBJ, FileForest)
+    - pattern: isinstance($OBJ, IsolatedEnvironment)
+    - pattern: isinstance($OBJ, ConcatCollator)
+    - pattern: isinstance($OBJ, AgentCollator)
+    - pattern: isinstance($OBJ, RuleOptimizer)
+    - pattern: isinstance($OBJ, QualityFirstPolicy)

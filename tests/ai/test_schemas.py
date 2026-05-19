@@ -92,7 +92,7 @@ class TestDataItemGeneric:
       custom=SimpleCustom(domain='math', difficulty='hard'),
     )
     back = DataItem[SimpleCustom].model_validate(item.model_dump())
-    assert back.id == 'e1'
+    assert back.item_id == 'e1'
     assert back.custom.domain == 'math'
     assert back.custom.difficulty == 'hard'
 
@@ -331,7 +331,7 @@ class TestCheckpointHeader:
       config_hash='h',
       created_at='t',
     )
-    assert h.type == 'header'
+    assert h.checkpoint_type == 'header'
 
   def test_args_default(self) -> None:
     h = CheckpointHeader(
@@ -350,9 +350,9 @@ class TestCheckpointEvent:
       timestamp='2026-01-01T00:00:00Z',
       payload={'x': 1},
     )
-    back = CheckpointEvent.model_validate(ev.model_dump())
-    assert back.type == 'done'
-    assert back.id == 'i1'
+    back = CheckpointEvent.model_validate(ev.model_dump(by_alias=True))
+    assert back.event_kind == 'done'
+    assert back.item_id == 'i1'
     assert back.payload == {'x': 1}
 
   def test_payload_default(self) -> None:

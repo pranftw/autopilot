@@ -1,54 +1,28 @@
 """Callback hooks with gradient accumulation."""
 
 from autopilot.core.callbacks.callback import Callback
-from autopilot.core.loss import Loss
-from autopilot.core.module import AutoPilotModule
-from autopilot.core.optimizer import Optimizer
+from autopilot.core.module.autopilot_module import AutoPilotModule
 from autopilot.core.parameter import Parameter
-from autopilot.core.trainer import Trainer
+from autopilot.core.trainer.trainer import Trainer
 from autopilot.core.types import Datum
 from autopilot.data.dataloader import DataLoader
-from helpers import NumericGradient
-
-
-class _TLoss(Loss):
-  def __init__(self, params):
-    super().__init__(params)
-
-  def forward(self, data, targets=None):
-    pass
-
-  def backward(self):
-    for p in self._loss_parameters:
-      if p.requires_grad:
-        p.grad = NumericGradient(value=1.0)
-
-  def reset(self):
-    pass
-
-
-class _TOpt(Optimizer):
-  def __init__(self, params):
-    super().__init__(params)
-
-  def step(self):
-    pass
+from tests.doubles import DirectNumericLoss, NoOpOptimizer
 
 
 class _Mod(AutoPilotModule):
   def __init__(self):
     super().__init__()
     self.param = Parameter(requires_grad=True)
-    self.loss = _TLoss([self.param])
-    self._opt = _TOpt([self.param])
+    self.loss = DirectNumericLoss([self.param])
+    self._opt = NoOpOptimizer([self.param])
 
   def forward(self, batch):
     return batch
 
-  def training_step(self, batch):
+  def training_step(self, batch, batch_idx):
     return batch
 
-  def validation_step(self, batch):
+  def validation_step(self, batch, batch_idx):
     return batch
 
   def configure_optimizers(self):
@@ -59,22 +33,22 @@ class _Cb(Callback):
   def __init__(self):
     self.calls: list[str] = []
 
-  def on_train_batch_start(self, trainer, batch_idx: int = 0):
+  def on_train_batch_start(self, trainer, module, batch_idx: int = 0):
     self.calls.append(f'bs:{batch_idx}')
 
-  def on_train_batch_end(self, trainer, batch_idx: int = 0, data=None):
+  def on_train_batch_end(self, trainer, module, batch_idx: int = 0, data=None):
     self.calls.append(f'be:{batch_idx}')
 
-  def on_before_backward(self, trainer):
+  def on_before_backward(self, trainer, module, loss_fn=None):
     self.calls.append('bb')
 
-  def on_after_backward(self, trainer):
+  def on_after_backward(self, trainer, module):
     self.calls.append('ab')
 
-  def on_before_optimizer_step(self, trainer):
+  def on_before_optimizer_step(self, trainer, module):
     self.calls.append('bos')
 
-  def on_before_zero_grad(self, trainer):
+  def on_before_zero_grad(self, trainer, module):
     self.calls.append('bzg')
 
 

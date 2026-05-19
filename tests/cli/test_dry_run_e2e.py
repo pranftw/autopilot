@@ -2,25 +2,31 @@
 
 Exercises the walkthrough from the plan:
   workspace init -> workspace doctor -> dataset list
-  -> experiment create -> optimize loop --dry-run
-Then verifies manifests, events, command logs, results, dataset snapshots,
-runtime override wiring, and records/ boundary.
+  -> experiment setup -> optimize loop --dry-run
+Then verifies Forest-backed experiments, events, command logs, results,
+dataset snapshots, runtime override wiring, and records/ boundary.
+
+Tests set up experiments via Forest nodes and events on disk. The experiment
+CLI tests live in test_experiment_cmd.py.
 """
 
+from autopilot.ai.forest import FileForest
+from autopilot.ai.store.file_store import FileStore
 from autopilot.cli.context import build_context
 from autopilot.cli.main import build_parser
 from autopilot.core.callbacks.callback import Callback
-from autopilot.core.hyperparams import load_hyperparams, update_hyperparams
-from autopilot.core.module import Module
-from autopilot.core.trainer import Trainer
-from autopilot.core.types import Datum
+from autopilot.core.config import AutoPilotConfig
+from autopilot.core.experiment import Experiment
+from autopilot.core.logger import append_event, create_event, load_events
+from autopilot.core.module.autopilot_module import AutoPilotModule
+from autopilot.core.node import Node
+from autopilot.core.trainer.trainer import Trainer
+from autopilot.core.types import EvalDatum
 from autopilot.policy.gates import MaxGate, MinGate
 from autopilot.policy.quality_first import QualityFirstMetric, QualityFirstPolicy
-from autopilot.tracking.events import load_events
-from autopilot.tracking.manifest import load_manifest
 from pathlib import Path
 from typing import Any
-import autopilot.core.paths as paths
+import importlib.util
 import json
 import pytest
 import tomllib
@@ -31,23 +37,23 @@ def workspace(tmp_path: Path) -> Path:
   """Set up a temporary workspace with full autopilot overlay structure."""
   ws = tmp_path / 'my-project'
   ws.mkdir()
-  autopilot = ws / 'autopilot'
-  autopilot.mkdir()
+  ap_dir = ws / '.autopilot'
+  ap_dir.mkdir()
 
-  (autopilot / 'experiments').mkdir()
-  (autopilot / 'records').mkdir()
-  (autopilot / 'records' / 'promotions').mkdir()
-  (autopilot / 'records' / 'notes').mkdir()
-  (autopilot / 'datasets').mkdir()
-  (autopilot / 'datasets' / 'train').mkdir()
+  (ap_dir / 'experiments').mkdir()
+  (ap_dir / 'records').mkdir()
+  (ap_dir / 'records' / 'promotions').mkdir()
+  (ap_dir / 'records' / 'notes').mkdir()
+  (ap_dir / 'datasets').mkdir()
+  (ap_dir / 'datasets' / 'train').mkdir()
 
-  (autopilot / 'datasets' / 'val').mkdir()
-  (autopilot / 'datasets' / 'test').mkdir()
-  (autopilot / 'workflows').mkdir()
-  (autopilot / 'helpers').mkdir()
+  (ap_dir / 'datasets' / 'val').mkdir()
+  (ap_dir / 'datasets' / 'test').mkdir()
+  (ap_dir / 'workflows').mkdir()
+  (ap_dir / 'helpers').mkdir()
 
-  _write_workflow_toml(autopilot)
-  _write_dataset_files(autopilot)
+  _write_workflow_toml(ap_dir)
+  _write_dataset_files(ap_dir)
 
   return ws
 
@@ -106,7 +112,7 @@ def _write_dataset_files(autopilot: Path) -> None:
     )
 
 
-class _DryRunModule(Module):
+class _DryRunModule(AutoPilotModule):
   """Module for dry-run tests. All optimize commands return success."""
 
   def __init__(self, config: dict) -> None:
@@ -119,8 +125,14 @@ class _DryRunModule(Module):
     )
     self.metric = QualityFirstMetric(gates=gates)
 
-  def forward(self, ctx: dict[str, Any], params: dict[str, Any]) -> Datum:
-    return Datum(success=True, metadata={'dry_run': True, 'command': params.get('command')})
+  def forward(self, ctx: dict[str, Any], params: dict[str, Any]) -> EvalDatum:
+    return EvalDatum(success=True, metadata={'dry_run': True, 'command': params.get('command')})
+
+  def training_step(self, batch, batch_idx):
+    return self.forward({}, {})
+
+  def configure_optimizers(self):
+    return None
 
 
 def _build_gates(workflow: dict) -> list:
@@ -149,14 +161,15 @@ def build_trainer(
 def _run_cli(workspace: Path, argv: list[str]) -> None:
   """Parse and run a CLI command from an explicit argument list."""
   parser = build_parser()
-  full_argv = list(argv) + ['--workspace', str(workspace), '--json']
+  full_argv = [*list(argv), '--workspace', str(workspace), '--json']
   parsed = parser.parse_args(full_argv)
   ctx = build_context(parsed)
 
   try:
     profile = parsed.profile if hasattr(parsed, 'profile') else 'reasoning_v3_ci_staging'
-    wf_path = paths.root(workspace, ctx.project) / 'workflows' / f'{profile}.toml'
-    with open(wf_path, 'rb') as wf_file:
+    cfg = AutoPilotConfig(workspace=workspace, project=ctx.project)
+    wf_path = cfg.root / 'workflows' / f'{profile}.toml'
+    with Path(wf_path).open('rb') as wf_file:
       workflow = tomllib.load(wf_file)
     ctx.module = _DryRunModule(workflow)
     ctx.trainer = build_trainer(workflow, dry_run=ctx.dry_run)
@@ -168,31 +181,48 @@ def _run_cli(workspace: Path, argv: list[str]) -> None:
   handler(ctx, parsed)
 
 
+def _create_legacy_experiment(workspace: Path, slug: str, **kwargs: Any) -> Path:
+  """Create an experiment directory with Forest node and events."""
+  cfg = AutoPilotConfig(workspace=workspace)
+  exp_dir = cfg.experiment_path(slug=slug)
+  exp_dir.mkdir(parents=True, exist_ok=True)
+
+  cfg.store_path.mkdir(parents=True, exist_ok=True)
+  store = FileStore(cfg)
+  forest = FileForest(store)
+  if forest.get_tree('main') is None:
+    forest.create_tree('main')
+    forest.switch('main')
+  tree = forest.get_tree('main')
+  assert tree is not None
+  existing = tree.get(slug)
+  if existing is None:
+    exp = Experiment(
+      experiment_id=slug,
+      hypothesis=kwargs.get('hypothesis') or kwargs.get('idea'),
+    )
+    tree.add(Node(experiment=exp))
+  forest.save()
+
+  append_event(exp_dir, create_event('created', message='test setup'))
+  return exp_dir
+
+
 def _prepare_experiment(workspace: Path, slug: str) -> Path:
   """Create an experiment for optimize tests."""
-  _run_cli(
-    workspace,
-    [
-      'experiment',
-      'create',
-      '--slug',
-      slug,
-    ],
-  )
-  exp_dir = workspace / 'autopilot' / 'experiments' / slug
-  update_hyperparams(exp_dir, {'deploy_id': 'test-uid-abc123'})
+  exp_dir = _create_legacy_experiment(workspace, slug)
   return exp_dir
 
 
 class TestWorkspaceInit:
   def test_workspace_doctor_passes(self, workspace: Path) -> None:
     _run_cli(workspace, ['workspace', 'doctor'])
-    autopilot = workspace / 'autopilot'
-    assert autopilot.exists()
-    assert (autopilot / 'experiments').exists()
-    assert (autopilot / 'records').exists()
-    assert (autopilot / 'datasets').exists()
-    assert (autopilot / 'workflows').exists()
+    ap_dir = workspace / '.autopilot'
+    assert ap_dir.exists()
+    assert (ap_dir / 'experiments').exists()
+    assert (ap_dir / 'records').exists()
+    assert (ap_dir / 'datasets').exists()
+    assert (ap_dir / 'workflows').exists()
 
 
 class TestDatasetCommands:
@@ -200,76 +230,30 @@ class TestDatasetCommands:
     _run_cli(workspace, ['dataset', 'list'])
 
 
-class TestExperimentCreate:
+class TestLegacyExperimentCreate:
+  """Tests for experiment creation via Forest API."""
+
   def test_create_experiment(self, workspace: Path) -> None:
-    _run_cli(
+    exp_dir = _create_legacy_experiment(
       workspace,
-      [
-        'experiment',
-        'create',
-        '--slug',
-        'tool-contract-fix',
-        '--idea',
-        'align reasoning and think_web tool contracts',
-      ],
+      'tool-contract-fix',
+      idea='align reasoning and think_web tool contracts',
     )
 
-    exp_dir = workspace / 'autopilot' / 'experiments' / 'tool-contract-fix'
     assert exp_dir.exists()
-    assert (exp_dir / 'manifest.json').is_file()
     assert (exp_dir / 'events.jsonl').is_file()
 
-    manifest = load_manifest(exp_dir)
-    assert manifest.slug == 'tool-contract-fix'
-
-  def test_experiment_list_after_create(self, workspace: Path) -> None:
-    _run_cli(
-      workspace,
-      [
-        'experiment',
-        'create',
-        '--slug',
-        'test-exp',
-      ],
-    )
-    _run_cli(workspace, ['experiment', 'list'])
-
-  def test_experiment_show(self, workspace: Path) -> None:
-    _run_cli(
-      workspace,
-      [
-        'experiment',
-        'create',
-        '--slug',
-        'show-exp',
-      ],
-    )
-    _run_cli(workspace, ['experiment', 'show', '--experiment', 'show-exp'])
-
-  def test_experiment_status(self, workspace: Path) -> None:
-    _run_cli(
-      workspace,
-      [
-        'experiment',
-        'create',
-        '--slug',
-        'status-exp',
-      ],
-    )
-    _run_cli(workspace, ['experiment', 'status', '--experiment', 'status-exp'])
+    cfg = AutoPilotConfig(workspace=workspace)
+    store = FileStore(cfg)
+    forest = FileForest(store)
+    nodes = forest.query().filter(id='tool-contract-fix').all()
+    assert len(nodes) == 1
+    assert nodes[0].experiment.id == 'tool-contract-fix'
 
 
 class TestOptimizeLoopDryRun:
   def test_dry_run_reports_plan(self, workspace: Path) -> None:
-    _run_cli(
-      workspace,
-      [
-        'experiment',
-        'create',
-        '--slug',
-        'dry-run-exp',
-      ],
-    )
+    _create_legacy_experiment(workspace, 'dry-run-exp')
     _run_cli(
       workspace,
       [
@@ -281,20 +265,14 @@ class TestOptimizeLoopDryRun:
       ],
     )
 
-    exp_dir = workspace / 'autopilot' / 'experiments' / 'dry-run-exp'
-    checkpoint = load_manifest(exp_dir, strict=False)
-    assert checkpoint is not None
+    cfg = AutoPilotConfig(workspace=workspace)
+    store = FileStore(cfg)
+    forest = FileForest(store)
+    nodes = forest.query().filter(id='dry-run-exp').all()
+    assert len(nodes) >= 1
 
   def test_preflight_dry_run(self, workspace: Path) -> None:
-    _run_cli(
-      workspace,
-      [
-        'experiment',
-        'create',
-        '--slug',
-        'preflight-exp',
-      ],
-    )
+    _create_legacy_experiment(workspace, 'preflight-exp')
     _run_cli(
       workspace,
       [
@@ -375,79 +353,20 @@ class TestOptimizeLoopDryRun:
     )
 
 
-class TestSetHyperparams:
-  def test_set_hparams(self, workspace: Path) -> None:
-    _run_cli(
-      workspace,
-      [
-        'experiment',
-        'create',
-        '--slug',
-        'hparams-exp',
-      ],
-    )
-    _run_cli(
-      workspace,
-      [
-        'optimize',
-        'set-hparams',
-        '--experiment',
-        'hparams-exp',
-        '--values',
-        '{"deploy_id": "test-uid-123", "concurrency": 10}',
-      ],
-    )
+class TestExperimentStateIntegrity:
+  def test_experiment_state_dict_has_required_fields(self, workspace: Path) -> None:
+    _create_legacy_experiment(workspace, 'manifest-exp', idea='test fields')
 
-    exp_dir = workspace / 'autopilot' / 'experiments' / 'hparams-exp'
-    hparams = load_hyperparams(exp_dir)
-    assert hparams.values['deploy_id'] == 'test-uid-123'
-    assert hparams.values['concurrency'] == 10
-    assert hparams.version >= 1
+    cfg = AutoPilotConfig(workspace=workspace)
+    store = FileStore(cfg)
+    forest = FileForest(store)
+    nodes = forest.query().filter(id='manifest-exp').all()
+    assert len(nodes) == 1
+    state = nodes[0].experiment.state_dict()
 
-
-class TestManifestIntegrity:
-  def test_manifest_has_required_fields(self, workspace: Path) -> None:
-    _run_cli(
-      workspace,
-      [
-        'experiment',
-        'create',
-        '--slug',
-        'manifest-exp',
-        '--idea',
-        'test manifest fields',
-      ],
-    )
-
-    exp_dir = workspace / 'autopilot' / 'experiments' / 'manifest-exp'
-    data = json.loads((exp_dir / 'manifest.json').read_text(encoding='utf-8'))
-
-    required_keys = [
-      'slug',
-      'title',
-      'current_epoch',
-      'idea',
-      'hypothesis',
-      'hyperparams',
-      'decision',
-      'decision_reason',
-      'metadata',
-    ]
+    required_keys = ['id', 'status', 'epoch', 'hypothesis']
     for key in required_keys:
-      assert key in data, f'manifest missing required field: {key}'
-
-    removed_keys = [
-      'status',
-      'profile',
-      'target',
-      'environment',
-      'constraints',
-      'baseline',
-      'candidate',
-      'dataset_snapshot',
-    ]
-    for key in removed_keys:
-      assert key not in data, f'manifest should not have field: {key}'
+      assert key in state, f'experiment state missing field: {key}'
 
   def test_events_log_is_append_only(self, workspace: Path) -> None:
     exp_dir = _prepare_experiment(workspace, 'events-exp')
@@ -492,36 +411,25 @@ class TestManifestIntegrity:
 
 class TestRecordsBoundary:
   def test_experiments_not_in_records(self, workspace: Path) -> None:
-    _run_cli(
-      workspace,
-      [
-        'experiment',
-        'create',
-        '--slug',
-        'boundary-exp',
-      ],
-    )
-    records = workspace / 'autopilot' / 'records'
-    experiments = workspace / 'autopilot' / 'experiments'
+    _create_legacy_experiment(workspace, 'boundary-exp')
+    cfg = AutoPilotConfig(workspace=workspace)
+    records = cfg.records_path
+    experiments = cfg.experiments_path
     assert (experiments / 'boundary-exp').exists()
     assert not (records / 'boundary-exp').exists()
 
   def test_experiment_index_exists(self, workspace: Path) -> None:
-    records = workspace / 'autopilot' / 'records'
+    records = AutoPilotConfig(workspace=workspace).records_path
     (records / 'experiment_index.jsonl').write_text('', encoding='utf-8')
     assert (records / 'experiment_index.jsonl').is_file()
 
 
 class TestRegressionRemovedFeatures:
-  def test_manifest_no_status_field(self) -> None:
-    from autopilot.core.models import Manifest
-
-    manifest = Manifest(slug='test')
-    assert 'status' not in manifest.to_dict()
+  def test_manifest_module_deleted(self) -> None:
+    assert importlib.util.find_spec('autopilot.tracking.manifest') is None
 
   def test_no_state_module(self) -> None:
-    with pytest.raises(ModuleNotFoundError):
-      import autopilot.core.state  # noqa: F401
+    assert importlib.util.find_spec('autopilot.core.state') is None
 
   def test_no_state_transition_error(self) -> None:
     import autopilot.core.errors as errors_mod
@@ -529,22 +437,13 @@ class TestRegressionRemovedFeatures:
     assert not hasattr(errors_mod, 'StateTransitionError')
 
   def test_services_module_removed(self) -> None:
-    import importlib.util
-
     assert importlib.util.find_spec('autopilot.core.services') is None
 
   def test_checkpoints_module_removed(self) -> None:
-    import importlib.util
-
     assert importlib.util.find_spec('autopilot.core.checkpoints') is None
 
-  def test_no_update_manifest_status(self) -> None:
-    from autopilot.tracking import manifest
-
-    assert not hasattr(manifest, 'update_manifest_status')
-
   def test_no_trainer_run(self) -> None:
-    from autopilot.core.trainer import Trainer
+    from autopilot.core.trainer.trainer import Trainer
 
     t = Trainer()
     assert not hasattr(t, 'run')

@@ -1,31 +1,12 @@
-"""Shared data models: Manifest, Result, Event, Dataset records."""
+"""Shared data models: Event, Result, CommandRecord, DatasetEntry, DatasetSnapshot.
 
+HyperparamSet lives in core/hyperparams.py.
+"""
+
+from autopilot.core.constraint import ConstraintResult
 from autopilot.core.serialization import DictMixin
 from dataclasses import dataclass, field, fields
 from typing import Any
-import json
-
-
-@dataclass
-class Manifest(DictMixin):
-  """Experiment manifest: slug, epoch counter, hypothesis, decision, and metadata."""
-
-  slug: str
-  title: str | None = None
-  current_epoch: int = 0
-  idea: str | None = None
-  hypothesis: str | None = None
-  hyperparams: dict[str, Any] = field(default_factory=dict)
-  decision: str | None = None
-  decision_reason: str | None = None
-  metadata: dict[str, Any] = field(default_factory=dict)
-
-  @property
-  def is_decided(self) -> bool:
-    return bool(self.decision)
-
-  def to_json(self) -> str:
-    return json.dumps(self.to_dict(), indent=2)
 
 
 @dataclass
@@ -50,15 +31,89 @@ class CommandRecord(DictMixin):
 
 @dataclass
 class Result(DictMixin):
-  """Evaluation result: metrics, gate outcomes, and overall pass/fail."""
+  """Evaluation result: metrics, structured constraint outcomes, and computed pass/fail.
+
+  Breaking change: ``gates`` is ``list[ConstraintResult]`` (was ``dict[str, str]``).
+  ``passed`` is a computed property: ``all(c.passed for c in self.gates)``.
+  Passing a dict for ``gates`` raises ``TypeError``.
+  """
 
   metrics: dict[str, float] = field(default_factory=dict)
-  gates: dict[str, str] = field(default_factory=dict)
-  passed: bool = False
+  gates: list[ConstraintResult] = field(default_factory=list)
   summary: str | None = None
 
+  def __post_init__(self) -> None:
+    """Validate gates type; reject old dict format.
+
+    Raises:
+      TypeError: When ``gates`` is a dict (old format) instead of a list.
+    """
+    if isinstance(self.gates, dict):
+      msg = (
+        'Result.gates must be list[ConstraintResult], got dict. '
+        'The dict[str, str] format is removed. '
+        'Use ConstraintResult instances or gate_to_constraint().'
+      )
+      raise TypeError(msg)
+
+  @property
+  def passed(self) -> bool:
+    """Whether all constraint gates passed (vacuous truth when empty).
+
+    Returns:
+      True when every ``ConstraintResult`` in ``gates`` has ``passed=True``,
+      or when ``gates`` is empty.
+    """
+    return all(c.passed for c in self.gates)
+
   def __bool__(self) -> bool:
+    """Truthiness follows overall pass/fail, not metric presence.
+
+    Returns:
+      The ``passed`` property value.
+    """
     return self.passed
+
+  def to_dict(self) -> dict[str, Any]:
+    """Serialize including the computed ``passed`` property.
+
+    Returns:
+      Dict with ``metrics``, ``gates``, ``summary``, and ``passed`` keys.
+    """
+    result = super().to_dict()
+    result['passed'] = self.passed
+    return result
+
+  @classmethod
+  def from_dict(cls, data: dict[str, Any]) -> 'Result':
+    """Deserialize from dict, hydrating nested ConstraintResult entries.
+
+    Args:
+      data: Raw mapping with optional ``gates`` list of dicts.
+
+    Returns:
+      Result with hydrated ``ConstraintResult`` gates.
+
+    Raises:
+      TypeError: When ``gates`` is a dict (legacy format).
+    """
+    data = dict(data)
+    raw_gates = data.pop('gates', [])
+    if isinstance(raw_gates, dict):
+      msg = (
+        'Result.gates must be list[ConstraintResult], got dict. '
+        'The dict[str, str] format is removed. '
+        'Use ConstraintResult instances or gate_to_constraint().'
+      )
+      raise TypeError(msg)
+    gates_list = [] if raw_gates is None else raw_gates
+    hydrated_gates = [
+      ConstraintResult.from_dict(g) if isinstance(g, dict) else g for g in gates_list
+    ]
+    names = {f.name for f in fields(cls)}
+    filtered = {k: v for k, v in data.items() if k in names}
+    filtered.pop('passed', None)
+    return cls(gates=hydrated_gates, **filtered)
 
 
 @dataclass
@@ -82,28 +137,17 @@ class DatasetSnapshot(DictMixin):
 
   @classmethod
   def from_dict(cls, data: dict[str, Any]) -> 'DatasetSnapshot':
+    """Deserialize from dict, handling null -> empty container coercion for collection fields.
+
+    Args:
+      data: Raw mapping possibly containing null ``entries``.
+
+    Returns:
+      DatasetSnapshot with coerced and parsed ``entries``.
+    """
     data = dict(data)
-    data['entries'] = [DatasetEntry.from_dict(e) for e in data.get('entries', [])]
+    raw_entries = data.get('entries')
+    seq = [] if raw_entries is None else raw_entries
+    data['entries'] = [DatasetEntry.from_dict(e) for e in seq]
     names = {f.name for f in fields(cls)}
     return cls(**{k: v for k, v in data.items() if k in names})
-
-
-@dataclass
-class HyperparamSet(DictMixin):
-  """Versioned hyperparameter set with optional schema and lock."""
-
-  version: int = 1
-  values: dict[str, Any] = field(default_factory=dict)
-  schema: dict[str, Any] = field(default_factory=dict)
-  locked: bool = False
-
-
-@dataclass
-class Promotion(DictMixin):
-  """Promote/reject decision record for an experiment."""
-
-  timestamp: str
-  decision: str
-  reason: str
-  reviewer: str | None = None
-  metadata: dict[str, Any] = field(default_factory=dict)

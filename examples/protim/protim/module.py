@@ -4,9 +4,9 @@ from autopilot.ai.parameter import PathParameter
 from autopilot.core.gradient import Gradient
 from autopilot.core.loss import Loss
 from autopilot.core.metric import Metric
-from autopilot.core.types import Datum
-from autopilot.core.module import AutoPilotModule
+from autopilot.core.module.autopilot_module import AutoPilotModule
 from autopilot.core.parameter import Parameter
+from autopilot.core.types import Datum, EvalDatum
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -15,6 +15,7 @@ from typing import Any
 @dataclass
 class PromptGradient(Gradient):
   failures: list[dict[str, str]] = field(default_factory=list)
+  metadata: dict[str, Any] = field(default_factory=dict)
 
   def accumulate(self, other: 'PromptGradient') -> 'PromptGradient':
     return PromptGradient(
@@ -38,13 +39,20 @@ class PromptGradient(Gradient):
 
 
 class PromptLoss(Loss):
-  """Accumulates QA failures, backward() builds PromptGradient for the prompt parameter."""
+  """Accumulates QA failures; graph backward distributes gradients to parameters.
+
+  forward() tracks per-item failures and delegates to Loss.forward() for
+  _last_data / _accumulated bookkeeping. compute_seed_gradient() produces
+  a PromptGradient seed. backward() is inherited from Loss and drives
+  graph.backward() -- no direct param.grad assignment.
+  """
 
   def __init__(self, parameters: list[Parameter] | None = None):
     super().__init__(parameters)
     self._failures: list[dict[str, str]] = []
 
-  def forward(self, data: Datum, targets: Any = None) -> None:
+  def forward(self, data: EvalDatum, targets: Any = None) -> None:
+    super().forward(data, targets)
     if not data.success:
       self._failures.append(
         {
@@ -55,13 +63,11 @@ class PromptLoss(Loss):
         }
       )
 
-  def backward(self) -> None:
-    grad = PromptGradient(failures=list(self._failures))
-    for param in self._loss_parameters:
-      if param.requires_grad:
-        param.grad = grad
+  def compute_seed_gradient(self) -> PromptGradient:
+    return PromptGradient(failures=list(self._failures))
 
   def reset(self) -> None:
+    super().reset()
     self._failures = []
 
 
@@ -73,7 +79,7 @@ class QAAccuracyMetric(Metric):
     self.add_state('_correct', 0)
     self.add_state('_total', 0)
 
-  def update(self, datum: Datum) -> None:
+  def update(self, datum: EvalDatum) -> None:
     self._total += 1
     if datum.success:
       self._correct += 1
@@ -96,15 +102,22 @@ class PromptModule(AutoPilotModule):
     self.loss = PromptLoss([self.prompt])
     self.accuracy = QAAccuracyMetric()
     self._prompts_dir = prompts_dir
-    self._infer_agent = ClaudeCodeAgent(allowed_tools=[])
+    self._infer_agent = ClaudeCodeAgent(allowed_tools=[], model='haiku')
 
   def _read_prompt(self) -> str:
     prompt_path = Path(self._prompts_dir) / 'system.txt'
     return prompt_path.read_text(encoding='utf-8').strip()
 
-  def forward(self, batch: Datum) -> Datum:
-    question = batch.metadata.get('question', '')
-    expected = batch.metadata.get('expected', '')
+  def _unwrap_single(self, batch: Any) -> EvalDatum:
+    """Extract the single EvalDatum from a collated Datum(items=[...]) wrapper."""
+    if isinstance(batch, Datum) and batch.items and isinstance(batch.items[0], EvalDatum):
+      return batch.items[0]
+    return batch
+
+  def forward(self, batch: Any) -> EvalDatum:
+    item = self._unwrap_single(batch)
+    question = item.metadata.get('question', '')
+    expected = item.metadata.get('expected', '')
 
     system_prompt = self._read_prompt()
     full_prompt = (
@@ -115,14 +128,14 @@ class PromptModule(AutoPilotModule):
       result = self._infer_agent.run(full_prompt)
       actual = result.output.strip()
     except Exception as exc:
-      return Datum(
+      return EvalDatum(
         success=False,
         error_message=str(exc),
         metadata={'question': question, 'expected': expected, 'actual': ''},
       )
 
     success = expected.lower() in actual.lower()
-    return Datum(
+    return EvalDatum(
       success=success,
       metadata={
         'question': question,
@@ -131,18 +144,19 @@ class PromptModule(AutoPilotModule):
       },
     )
 
-  def training_step(self, batch: Any) -> Datum:
-    return self.forward(batch)
+  def training_step(self, batch: Any, batch_idx: int) -> EvalDatum:
+    return self(batch)
 
-  def validation_step(self, batch: Any) -> Datum:
-    return self.forward(batch)
+  def validation_step(self, batch: Any, batch_idx: int) -> EvalDatum:
+    return self(batch)
 
   def configure_optimizers(self):
     optimizer_agent = ClaudeCodeAgent(
       allowed_tools=['Edit', 'Write', 'Read'],
       cwd=self._prompts_dir,
+      model='haiku',
     )
     return AgentOptimizer(
       agent=optimizer_agent,
-      parameters=list(self.parameters()),
+      params=list(self.parameters()),
     )

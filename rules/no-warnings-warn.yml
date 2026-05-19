@@ -1,0 +1,6 @@
+id: no-warnings-warn
+language: Python
+severity: error
+message: Do not use warnings.warn(). Raise a specific exception or handle silently. See CLAUDE.md Prohibited patterns.
+rule:
+  pattern: warnings.warn($$$ARGS)

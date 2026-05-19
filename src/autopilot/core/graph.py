@@ -1,44 +1,51 @@
-"""Computation graph: PyTorch-style autograd for AutoPilot.
+"""Computation graph: OperatorNode-based autograd engine for AutoPilot.
 
-Node records a Module.__call__ invocation. Graph is an explicit DAG of Nodes.
-backward() traverses via dependency-counting (PyTorch engine algorithm).
-no_grad()/enable_grad() control recording via ContextVar (graph ON by default).
+Graph is an explicit DAG container driven by OperatorNode (from core/operator.py).
+backward() implements a dependency-counting engine with:
+  Phase 1: DFS with 3-state coloring for cycle detection + dependency counting.
+  Phase 2: Heap-ordered (by -sequence_nr) fan-in processing with gradient accumulation.
+
+Note:
+  This is a leaf module with zero ``autopilot`` imports. All nodes are duck-typed.
+
+backward() calls node(combined_grad), reads node.next_functions and node.sequence_nr
+without importing OperatorNode.
 
 Key classes:
-  Graph              -- explicit DAG container. record() adds nodes, backward() traverses.
-  Node               -- single Module.__call__ record with hooks and next_functions.
-  AccumulateGrad     -- leaf node for Parameters. Calls param.grad.accumulate().
+  Graph              -- explicit DAG container. add_node() registers, backward() traverses.
   RemovableHandle    -- hook registration handle with remove().
   no_grad/enable_grad -- context managers for recording control.
-
-Module.__call__ records to the graph automatically when grad mode is enabled.
-_collect_input_nodes extracts grad_fn from Datum args; _create_gradient_edge
-attaches the producer Node to output Datum.
 """
 
-from autopilot.core.parameter import Parameter
-from autopilot.core.types import Datum
-from collections import OrderedDict
+from collections.abc import Iterator
 from contextvars import ContextVar
-from typing import Any, Iterator
+from typing import Any
 import heapq
 import weakref
 
 _grad_enabled: ContextVar[bool] = ContextVar('_grad_enabled', default=True)
-_current_graph: ContextVar['Graph | None'] = ContextVar('_current_graph', default=None)
+current_graph: ContextVar['Graph | None'] = ContextVar('current_graph', default=None)
 
 
 def is_grad_enabled() -> bool:
-  """Like torch.is_grad_enabled(). True by default."""
+  """Like torch.is_grad_enabled(). True by default.
+
+  Returns:
+    Whether autograd recording is enabled in the current context.
+  """
   return _grad_enabled.get(True)
 
 
 def get_current_graph() -> 'Graph':
-  """Get or lazily create the current computation graph."""
-  graph = _current_graph.get(None)
+  """Get or lazily create the current computation graph.
+
+  Returns:
+    The active ``Graph`` for this context, creating one if needed.
+  """
+  graph = current_graph.get(None)
   if graph is None:
     graph = Graph()
-    _current_graph.set(graph)
+    current_graph.set(graph)
   return graph
 
 
@@ -50,11 +57,17 @@ class no_grad:
   """
 
   def __enter__(self) -> 'no_grad':
+    """Disable grad recording for the duration of the context.
+
+    Returns:
+      This context manager instance.
+    """
     self._prev = _grad_enabled.get(True)
     _grad_enabled.set(False)
     return self
 
   def __exit__(self, *exc: object) -> None:
+    """Restore the previous grad-enabled flag."""
     _grad_enabled.set(self._prev)
 
 
@@ -65,11 +78,17 @@ class enable_grad:
   """
 
   def __enter__(self) -> 'enable_grad':
+    """Force grad recording on for the duration of the context.
+
+    Returns:
+      This context manager instance.
+    """
     self._prev = _grad_enabled.get(True)
     _grad_enabled.set(True)
     return self
 
   def __exit__(self, *exc: object) -> None:
+    """Restore the previous grad-enabled flag."""
     _grad_enabled.set(self._prev)
 
 
@@ -79,169 +98,203 @@ class RemovableHandle:
   _next_id: int = 0
 
   def __init__(self, hooks_dict: dict) -> None:
+    """Register this handle against a weak-referenced hooks mapping.
+
+    Args:
+      hooks_dict: Mutable dict of hook id -> callable; weakly held.
+    """
     self.id = RemovableHandle._next_id
     RemovableHandle._next_id += 1
     self._hooks_dict_ref = weakref.ref(hooks_dict)
 
   def remove(self) -> None:
+    """Drop this hook from the parent dict if it is still alive."""
     hooks_dict = self._hooks_dict_ref()
     if hooks_dict is not None and self.id in hooks_dict:
       del hooks_dict[self.id]
 
 
-class Node:
-  """Records a single Module.__call__ invocation. Like torch.autograd.graph.Node."""
-
-  def __init__(
-    self,
-    module: Any = None,
-    next_functions: tuple[tuple['Node | None', int], ...] = (),
-    sequence_nr: int = 0,
-  ) -> None:
-    self._module = module
-    self._next_functions = next_functions
-    self._hooks: OrderedDict[int, Any] = OrderedDict()
-    self._prehooks: OrderedDict[int, Any] = OrderedDict()
-    self._sequence_nr = sequence_nr
-
-  def name(self) -> str:
-    if self._module is not None:
-      return type(self._module).__name__
-    return 'Node'
-
-  @property
-  def next_functions(self) -> tuple[tuple['Node | None', int], ...]:
-    return self._next_functions
-
-  def register_hook(self, fn: Any) -> RemovableHandle:
-    handle = RemovableHandle(self._hooks)
-    self._hooks[handle.id] = fn
-    return handle
-
-  def register_prehook(self, fn: Any) -> RemovableHandle:
-    handle = RemovableHandle(self._prehooks)
-    self._prehooks[handle.id] = fn
-    return handle
-
-  def __call__(self, *grads: Any) -> tuple:
-    for hook in self._prehooks.values():
-      result = hook(self, grads)
-      if result is not None:
-        grads = result
-
-    output = self.apply(*grads)
-
-    for hook in self._hooks.values():
-      result = hook(self, grads, output)
-      if result is not None:
-        output = result
-
-    return output
-
-  def apply(self, *grads: Any) -> tuple:
-    return grads
-
-  def __repr__(self) -> str:
-    return f'{self.name()}(seq={self._sequence_nr})'
-
-
-class AccumulateGrad(Node):
-  """Leaf node for Parameters. Accumulates into Parameter.grad."""
-
-  def __init__(self, parameter: Any, sequence_nr: int) -> None:
-    super().__init__(module=None, next_functions=(), sequence_nr=sequence_nr)
-    self._parameter = parameter
-
-  def name(self) -> str:
-    return 'AccumulateGrad'
-
-  def apply(self, *grads: Any) -> tuple[()]:
-    if grads and grads[0] is not None:
-      if self._parameter.grad is None:
-        self._parameter.grad = grads[0]
-      else:
-        self._parameter.grad = self._parameter.grad.accumulate(grads[0])
-    return ()
-
-
 class Graph:
-  """Explicit computation graph. Container for Nodes."""
+  """Explicit computation graph driven by OperatorNode.
+
+  Nodes are duck-typed: backward() calls node(combined_grad), reads
+  node.next_functions and node.sequence_nr without importing any type.
+  """
 
   def __init__(self) -> None:
-    self._nodes: list[Node] = []
+    """Create an empty graph with sequence counter zero."""
+    self._nodes: list = []
     self._sequence_nr: int = 0
+    self._freed: bool = False
 
-  def _next_sequence_nr(self) -> int:
+  def next_sequence_nr(self) -> int:
+    """Return and increment the monotonic sequence counter."""
     nr = self._sequence_nr
     self._sequence_nr += 1
     return nr
 
-  def record(
-    self,
-    module: Any,
-    inputs: Any,
-    output: Any,
-    prev_nodes: list[tuple[Node | None, int]],
-  ) -> Node:
-    """Create a Node for this operation and add it to the graph."""
-    node = Node(
-      module=module,
-      next_functions=tuple(prev_nodes),
-      sequence_nr=self._next_sequence_nr(),
-    )
+  def add_node(self, node: Any) -> None:
+    """Register a node (duck-typed) in the graph."""
     self._nodes.append(node)
-    return node
+    self._freed = False
 
-  def nodes(self) -> Iterator[Node]:
+  def nodes(self) -> Iterator[Any]:
+    """Iterate over registered nodes.
+
+    Yields:
+      Each duck-typed node in registration order.
+    """
     yield from self._nodes
 
-  def backward(
-    self,
-    target: Node,
-    grad: Any = None,
-    retain_graph: bool = False,
-  ) -> None:
-    """Dependency-counting backward traversal. Like PyTorch engine."""
+  def _count_dependencies(self, root: Any) -> dict[int, int]:
+    """Phase 1: DFS cycle detection and fan-in counts per predecessor id.
+
+    Args:
+      root: Root duck-typed node with ``next_functions``.
+
+    Returns:
+      Map from ``id(previous_node)`` to how many successors still reference it.
+
+    Raises:
+      RuntimeError: If a cycle is detected in the node dependency graph.
+    """
+    # iterative DFS with explicit post-order: counts each edge once and flags
+    # back-edges (in_stack) so we fail before backward runs on a cyclic graph.
+    unvisited, in_stack, done = 0, 1, 2
     deps: dict[int, int] = {}
-    visited: set[int] = set()
-    queue = [target]
-    while queue:
-      node = queue.pop()
+    state: dict[int, int] = {}
+    stack = [(root, False)]
+    while stack:
+      node, returning = stack.pop()
       nid = id(node)
-      if nid in visited:
+      if returning:
+        state[nid] = done
         continue
-      visited.add(nid)
+      visit_state = state.get(nid, unvisited)
+      if visit_state == done:
+        continue
+      if visit_state == in_stack:
+        msg = 'cycle detected in computation graph'
+        raise RuntimeError(msg)
+      state[nid] = in_stack
+      stack.append((node, True))
       for prev_node, _ in node.next_functions:
-        if prev_node is not None:
-          pid = id(prev_node)
-          deps[pid] = deps.get(pid, 0) + 1
-          queue.append(prev_node)
+        if prev_node is None:
+          continue
+        prev_id = id(prev_node)
+        deps[prev_id] = deps.get(prev_id, 0) + 1
+        stack.append((prev_node, False))
+    return deps
 
-    ready: list[tuple[int, int, Node, Any]] = []
+  def _propagate_grads(
+    self,
+    node: Any,
+    combined_grad: Any,
+    deps: dict[int, int],
+    pending_grads: dict[int, Any],
+    ready: list[tuple[int, int, Any, Any]],
+    counter: int,
+  ) -> int:
+    """Run ``node(combined_grad)`` and enqueue predecessors when fan-in is satisfied.
+
+    Args:
+      node: Current duck-typed operator node.
+      combined_grad: Accumulated gradient for this node.
+      deps: Mutable fan-in counts (decremented as gradients flow backward).
+      pending_grads: Partial gradients keyed by ``id(predecessor)``.
+      ready: Min-heap of ``(-sequence_nr, counter, node, grad)`` tuples.
+      counter: Monotonic tie-breaker for heap-stable ordering.
+
+    Returns:
+      Updated counter after any ``heappush`` operations.
+    """
+    # deps mirrors "pending successors" per predecessor; reaching zero means
+    # all upstream grads for that predecessor were accumulated in pending_grads.
+    output_grads = node(combined_grad)
+    next_counter = counter
+    for idx, (prev_node, _) in enumerate(node.next_functions):
+      if prev_node is None:
+        continue
+      prev_id = id(prev_node)
+      prev_grad = output_grads[idx] if idx < len(output_grads) else None
+      if prev_grad is None:
+        continue
+      deps[prev_id] = deps.get(prev_id, 1) - 1
+
+      existing = pending_grads.get(prev_id)
+      if existing is not None:
+        pending_grads[prev_id] = existing.accumulate(prev_grad)
+      else:
+        pending_grads[prev_id] = prev_grad
+
+      if deps.get(prev_id, 0) <= 0:
+        final_grad = pending_grads.pop(prev_id, None)
+        heapq.heappush(
+          ready,
+          (-prev_node.sequence_nr, next_counter, prev_node, final_grad),
+        )
+        next_counter += 1
+    return next_counter
+
+  def _process_backward_queue(
+    self,
+    root: Any,
+    grad: Any,
+    deps: dict[int, int],
+  ) -> None:
+    """Phase 2: heap-ordered fan-in backward from ``root`` using ``deps``.
+
+    Args:
+      root: Root node.
+      grad: Initial gradient on ``root``.
+      deps: Fan-in counts from `_count_dependencies` (mutated during traversal).
+    """
+    # max-heap via negated sequence_nr: pop highest forward order index first,
+    # i.e. reverse forward schedule so gradients flow from outputs toward inputs.
+    ready: list[tuple[int, int, Any, Any]] = []
     counter = 0
-    heapq.heappush(ready, (-target._sequence_nr, counter, target, grad))
+    heapq.heappush(ready, (-root.sequence_nr, counter, root, grad))
     counter += 1
-
     processed: set[int] = set()
+    pending_grads: dict[int, Any] = {}
 
     while ready:
       _, _, node, node_grad = heapq.heappop(ready)
       nid = id(node)
+      # duplicate heap entries can appear before fan-in completes; first visit wins.
       if nid in processed:
         continue
       processed.add(nid)
 
-      output_grads = node(node_grad)
+      combined_grad = pending_grads.pop(nid, None)
+      if combined_grad is not None and node_grad is not None:
+        combined_grad = combined_grad.accumulate(node_grad)
+      elif node_grad is not None:
+        combined_grad = node_grad
+      if combined_grad is None:
+        continue
 
-      for i, (prev_node, _) in enumerate(node.next_functions):
-        if prev_node is None:
-          continue
-        pid = id(prev_node)
-        deps[pid] = deps.get(pid, 1) - 1
-        prev_grad = output_grads[i] if i < len(output_grads) else None
-        if deps.get(pid, 0) <= 0:
-          heapq.heappush(ready, (-prev_node._sequence_nr, counter, prev_node, prev_grad))
-          counter += 1
+      counter = self._propagate_grads(node, combined_grad, deps, pending_grads, ready, counter)
+
+  def backward(self, root: Any, grad: Any, retain_graph: bool = False) -> None:
+    """Dependency-counting backward traversal with cycle detection.
+
+    Phase 1: DFS with 3-state coloring for cycle detection + dependency counting.
+    Phase 2: Heap-ordered (by -sequence_nr) fan-in processing.
+
+    Raises:
+      RuntimeError: When the graph was freed without ``retain_graph=True``, or when
+        a cycle is detected in the node dependency graph.
+    """
+    if self._freed:
+      msg = 'graph has been freed; use retain_graph=True'
+      raise RuntimeError(msg)
+
+    # phase 1: derive per-node fan-in counts (and reject cycles) without running
+    # backward callables, so phase 2 knows when a predecessor accumulated full grad.
+    deps = self._count_dependencies(root)
+    # phase 2: schedule ``backward`` in reverse forward order with heap tie-breaks.
+    self._process_backward_queue(root, grad, deps)
 
     if not retain_graph:
       self.reset()
@@ -250,55 +303,12 @@ class Graph:
     """Clear all nodes. Called between epochs or after backward."""
     self._nodes.clear()
     self._sequence_nr = 0
+    self._freed = True
 
   def __len__(self) -> int:
+    """Return the number of registered nodes."""
     return len(self._nodes)
 
   def __repr__(self) -> str:
+    """Return a debug string with the node count."""
     return f'Graph(nodes={len(self._nodes)})'
-
-
-def _flatten(args: tuple, kwargs: dict) -> Iterator[Any]:
-  """Recursively yield all leaf values from args and kwargs."""
-  for arg in args:
-    if isinstance(arg, (list, tuple)):
-      yield from _flatten(tuple(arg), {})
-    elif isinstance(arg, dict):
-      yield from _flatten((), arg)
-    else:
-      yield arg
-  for v in kwargs.values():
-    if isinstance(v, (list, tuple)):
-      yield from _flatten(tuple(v), {})
-    elif isinstance(v, dict):
-      yield from _flatten((), v)
-    else:
-      yield v
-
-
-def _collect_input_nodes(
-  args: tuple,
-  kwargs: dict,
-  graph: Graph,
-) -> list[tuple[Node | None, int]]:
-  """Extract grad_fn from any Datum in args/kwargs. Like collect_next_edges."""
-  nodes: list[tuple[Node | None, int]] = []
-  for arg in _flatten(args, kwargs):
-    if not isinstance(arg, Datum):
-      continue
-    if hasattr(arg, 'grad_fn') and arg.grad_fn is not None:
-      nodes.append((arg.grad_fn, 0))
-    elif isinstance(arg, Parameter) and arg.requires_grad:
-      acc = getattr(arg, '_grad_accumulator', None)
-      if acc is None:
-        acc = AccumulateGrad(arg, graph._next_sequence_nr())
-        object.__setattr__(arg, '_grad_accumulator', acc)
-        graph._nodes.append(acc)
-      nodes.append((acc, 0))
-  return nodes
-
-
-def _create_gradient_edge(output: Any, node: Node) -> None:
-  """Attach producer Node to output Datum. Like create_gradient_edge."""
-  if isinstance(output, Datum):
-    object.__setattr__(output, 'grad_fn', node)

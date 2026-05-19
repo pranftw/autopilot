@@ -71,6 +71,120 @@ class TestSlidingWindowLimiter:
     elapsed = time.monotonic() - t0
     assert elapsed < 1.0
 
+  def test_sync_acquire_triggers_sleep_when_full(self) -> None:
+    """When window is full, acquire sleeps until a slot opens."""
+    limiter = SlidingWindowLimiter(max_rpm=1, safety_margin=1.0)
+    # first acquire: now=10.0, window empty, appends 10.0
+    # second acquire: now=11.0, window[0]=10.0 not expired, len=1>=1
+    # sleep_time = 60 - (11 - 10) = 59
+    # post-sleep: now=70.0, prune 10.0 <= 70-60=10 (yes), appends 70.0
+    mono_values = iter([10.0, 10.0, 11.0, 70.0, 70.0])
+    sleep_calls: list[float] = []
+
+    def fake_monotonic() -> float:
+      return next(mono_values)
+
+    def fake_sleep(t: float) -> None:
+      sleep_calls.append(t)
+
+    with (
+      patch('autopilot.ai.runtime.time.monotonic', side_effect=fake_monotonic),
+      patch('autopilot.ai.runtime.time.sleep', side_effect=fake_sleep),
+    ):
+      limiter.acquire()
+      limiter.acquire()
+
+    assert len(sleep_calls) == 1
+    assert sleep_calls[0] == pytest.approx(59.0)
+    # first entry (10.0) pruned post-sleep (10.0 <= 70-60), only new append remains
+    assert len(limiter._window) == 1
+    assert limiter._window[0] == 70.0
+
+  def test_sync_acquire_post_sleep_prunes_old(self) -> None:
+    """After sleeping, the post-sleep prune loop removes expired entries."""
+    limiter = SlidingWindowLimiter(max_rpm=2, safety_margin=1.0)
+    # pre-fill window with 2 entries at t=0 and t=1
+    limiter._window.append(0.0)
+    limiter._window.append(1.0)
+    # acquire: now=2.0, window[0]=0.0, 0.0 <= 2.0-60=-58? No. Not expired.
+    # len=2 >= 2, sleep_time = 60 - (2.0 - 0.0) = 58
+    # after sleep: now=65.0, prune: 0.0 <= 65-60=5? Yes. 1.0 <= 5? Yes.
+    # appends 65.0
+    mono_values = iter([2.0, 65.0, 65.0])
+    sleep_calls: list[float] = []
+
+    def fake_monotonic() -> float:
+      return next(mono_values)
+
+    def fake_sleep(t: float) -> None:
+      sleep_calls.append(t)
+
+    with (
+      patch('autopilot.ai.runtime.time.monotonic', side_effect=fake_monotonic),
+      patch('autopilot.ai.runtime.time.sleep', side_effect=fake_sleep),
+    ):
+      limiter.acquire()
+
+    assert len(sleep_calls) == 1
+    assert sleep_calls[0] == pytest.approx(58.0)
+    # old entries pruned, only new one remains
+    assert len(limiter._window) == 1
+    assert limiter._window[0] == 65.0
+
+  @pytest.mark.asyncio
+  async def test_async_acquire_triggers_sleep_when_full(self) -> None:
+    """async_acquire sleeps when window is at capacity."""
+    limiter = SlidingWindowLimiter(max_rpm=1, safety_margin=1.0)
+    # same logic as sync: sleep_time = 60 - (11 - 10) = 59
+    mono_values = iter([10.0, 10.0, 11.0, 70.0, 70.0])
+    sleep_calls: list[float] = []
+
+    def fake_monotonic() -> float:
+      return next(mono_values)
+
+    async def fake_async_sleep(t: float) -> None:
+      sleep_calls.append(t)
+
+    with (
+      patch('autopilot.ai.runtime.time.monotonic', side_effect=fake_monotonic),
+      patch('autopilot.ai.runtime.asyncio.sleep', side_effect=fake_async_sleep),
+    ):
+      await limiter.async_acquire()
+      await limiter.async_acquire()
+
+    assert len(sleep_calls) == 1
+    assert sleep_calls[0] == pytest.approx(59.0)
+    # first entry pruned post-sleep, only the new append remains
+    assert len(limiter._window) == 1
+    assert limiter._window[0] == 70.0
+
+  @pytest.mark.asyncio
+  async def test_async_acquire_post_sleep_prunes(self) -> None:
+    """async_acquire prunes expired entries after sleeping."""
+    limiter = SlidingWindowLimiter(max_rpm=1, safety_margin=1.0)
+    limiter._window.append(5.0)
+    # now=6.0, window[0]=5.0 not expired (5.0 <= 6-60=-54? No), len=1>=1
+    # sleep_time = 60 - (6-5) = 59, post-sleep now=70.0, 5.0<=70-60=10 -> pruned
+    mono_values = iter([6.0, 70.0, 70.0])
+    sleep_calls: list[float] = []
+
+    def fake_monotonic() -> float:
+      return next(mono_values)
+
+    async def fake_async_sleep(t: float) -> None:
+      sleep_calls.append(t)
+
+    with (
+      patch('autopilot.ai.runtime.time.monotonic', side_effect=fake_monotonic),
+      patch('autopilot.ai.runtime.asyncio.sleep', side_effect=fake_async_sleep),
+    ):
+      await limiter.async_acquire()
+
+    assert len(sleep_calls) == 1
+    assert sleep_calls[0] == pytest.approx(59.0)
+    assert len(limiter._window) == 1
+    assert limiter._window[0] == 70.0
+
 
 class TestParallelRunner:
   @pytest.mark.asyncio
@@ -148,7 +262,8 @@ class TestParallelRunner:
 
     async def fn(x: int) -> int:
       if x == 2:
-        raise ValueError('bad')
+        msg = 'bad'
+        raise ValueError(msg)
       return x
 
     with pytest.raises(ValueError, match='bad'):
@@ -186,3 +301,29 @@ class TestParallelRunner:
 
       await runner.run([1, 2, 3], fn)
     assert mock_async.await_count == 3
+
+  @pytest.mark.asyncio
+  async def test_parallel_runner_deterministic_order(self) -> None:
+    runner = ParallelRunner(3, limiter=None)
+    delays = {'a': 0.03, 'b': 0.02, 'c': 0.01}
+
+    async def fn(x: str) -> str:
+      await asyncio.sleep(delays[x])
+      return x
+
+    results = await runner.run(['a', 'b', 'c'], fn)
+    assert results == ['a', 'b', 'c']
+
+  @pytest.mark.asyncio
+  async def test_parallel_runner_partial_failure(self) -> None:
+    runner = ParallelRunner(3, limiter=None)
+
+    async def fn(x: str) -> str:
+      await asyncio.sleep(0.01)
+      if x == 'b':
+        msg = 'middle'
+        raise ValueError(msg)
+      return f'ok_{x}'
+
+    with pytest.raises(ValueError, match='middle'):
+      await runner.run(['a', 'b', 'c'], fn)

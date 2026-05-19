@@ -1,0 +1,336 @@
+{
+  "products": {
+    "1000000001": {
+      "name": "Laptop",
+      "product_id": "1000000001",
+      "variants": {
+        "var_001": {
+          "item_id": "var_001",
+          "options": {"color": "black", "storage": "256GB"},
+          "available": true,
+          "price": 999.99
+        },
+        "var_002": {
+          "item_id": "var_002",
+          "options": {"color": "silver", "storage": "512GB"},
+          "available": true,
+          "price": 1199.99
+        },
+        "var_003": {
+          "item_id": "var_003",
+          "options": {"color": "black", "storage": "512GB"},
+          "available": false,
+          "price": 1149.99
+        }
+      }
+    },
+    "1000000002": {
+      "name": "Headphones",
+      "product_id": "1000000002",
+      "variants": {
+        "var_010": {
+          "item_id": "var_010",
+          "options": {"color": "black", "type": "over-ear"},
+          "available": true,
+          "price": 149.99
+        },
+        "var_011": {
+          "item_id": "var_011",
+          "options": {"color": "white", "type": "over-ear"},
+          "available": true,
+          "price": 149.99
+        },
+        "var_012": {
+          "item_id": "var_012",
+          "options": {"color": "black", "type": "in-ear"},
+          "available": true,
+          "price": 79.99
+        }
+      }
+    },
+    "1000000003": {
+      "name": "Backpack",
+      "product_id": "1000000003",
+      "variants": {
+        "var_020": {
+          "item_id": "var_020",
+          "options": {"color": "blue", "size": "large"},
+          "available": true,
+          "price": 89.99
+        },
+        "var_021": {
+          "item_id": "var_021",
+          "options": {"color": "red", "size": "medium"},
+          "available": true,
+          "price": 79.99
+        }
+      }
+    },
+    "1000000004": {
+      "name": "Desk Lamp",
+      "product_id": "1000000004",
+      "variants": {
+        "var_030": {
+          "item_id": "var_030",
+          "options": {"color": "white", "brightness": "adjustable"},
+          "available": true,
+          "price": 49.99
+        }
+      }
+    },
+    "1000000005": {
+      "name": "Water Bottle",
+      "product_id": "1000000005",
+      "variants": {
+        "var_040": {
+          "item_id": "var_040",
+          "options": {"color": "green", "capacity": "32oz"},
+          "available": true,
+          "price": 24.99
+        },
+        "var_041": {
+          "item_id": "var_041",
+          "options": {"color": "blue", "capacity": "24oz"},
+          "available": true,
+          "price": 19.99
+        }
+      }
+    }
+  },
+  "users": {
+    "jane_doe_123": {
+      "user_id": "jane_doe_123",
+      "name": {"first_name": "Jane", "last_name": "Doe"},
+      "address": {
+        "address1": "123 Main St",
+        "address2": "Apt 4",
+        "city": "Springfield",
+        "state": "IL",
+        "country": "USA",
+        "zip": "62701"
+      },
+      "email": "jane.doe@example.com",
+      "payment_methods": {
+        "credit_card_1001": {
+          "source": "credit_card",
+          "id": "credit_card_1001",
+          "brand": "visa",
+          "last_four": "4242"
+        },
+        "gift_card_5001": {
+          "source": "gift_card",
+          "id": "gift_card_5001",
+          "balance": 150.00
+        }
+      },
+      "orders": ["#W0001", "#W0002", "#W0005"]
+    },
+    "john_smith_456": {
+      "user_id": "john_smith_456",
+      "name": {"first_name": "John", "last_name": "Smith"},
+      "address": {
+        "address1": "456 Oak Ave",
+        "address2": "",
+        "city": "Portland",
+        "state": "OR",
+        "country": "USA",
+        "zip": "97201"
+      },
+      "email": "john.smith@example.com",
+      "payment_methods": {
+        "credit_card_2001": {
+          "source": "credit_card",
+          "id": "credit_card_2001",
+          "brand": "mastercard",
+          "last_four": "8888"
+        },
+        "paypal_3001": {
+          "source": "paypal",
+          "id": "paypal_3001"
+        }
+      },
+      "orders": ["#W0003"]
+    },
+    "alice_wong_789": {
+      "user_id": "alice_wong_789",
+      "name": {"first_name": "Alice", "last_name": "Wong"},
+      "address": {
+        "address1": "789 Pine Rd",
+        "address2": "Suite 100",
+        "city": "Seattle",
+        "state": "WA",
+        "country": "USA",
+        "zip": "98101"
+      },
+      "email": "alice.wong@example.com",
+      "payment_methods": {
+        "credit_card_3001": {
+          "source": "credit_card",
+          "id": "credit_card_3001",
+          "brand": "amex",
+          "last_four": "1234"
+        },
+        "gift_card_6001": {
+          "source": "gift_card",
+          "id": "gift_card_6001",
+          "balance": 500.00
+        }
+      },
+      "orders": ["#W0004"]
+    }
+  },
+  "orders": {
+    "#W0001": {
+      "order_id": "#W0001",
+      "user_id": "jane_doe_123",
+      "address": {
+        "address1": "123 Main St",
+        "address2": "Apt 4",
+        "city": "Springfield",
+        "state": "IL",
+        "country": "USA",
+        "zip": "62701"
+      },
+      "items": [
+        {
+          "name": "Laptop",
+          "product_id": "1000000001",
+          "item_id": "var_001",
+          "price": 999.99,
+          "options": {"color": "black", "storage": "256GB"}
+        }
+      ],
+      "status": "delivered",
+      "fulfillments": [
+        {"tracking_id": ["TRK100"], "item_ids": ["var_001"]}
+      ],
+      "payment_history": [
+        {"transaction_type": "payment", "amount": 999.99, "payment_method_id": "credit_card_1001"}
+      ]
+    },
+    "#W0002": {
+      "order_id": "#W0002",
+      "user_id": "jane_doe_123",
+      "address": {
+        "address1": "123 Main St",
+        "address2": "Apt 4",
+        "city": "Springfield",
+        "state": "IL",
+        "country": "USA",
+        "zip": "62701"
+      },
+      "items": [
+        {
+          "name": "Headphones",
+          "product_id": "1000000002",
+          "item_id": "var_010",
+          "price": 149.99,
+          "options": {"color": "black", "type": "over-ear"}
+        },
+        {
+          "name": "Water Bottle",
+          "product_id": "1000000005",
+          "item_id": "var_040",
+          "price": 24.99,
+          "options": {"color": "green", "capacity": "32oz"}
+        }
+      ],
+      "status": "pending",
+      "fulfillments": [],
+      "payment_history": [
+        {"transaction_type": "payment", "amount": 174.98, "payment_method_id": "credit_card_1001"}
+      ]
+    },
+    "#W0003": {
+      "order_id": "#W0003",
+      "user_id": "john_smith_456",
+      "address": {
+        "address1": "456 Oak Ave",
+        "address2": "",
+        "city": "Portland",
+        "state": "OR",
+        "country": "USA",
+        "zip": "97201"
+      },
+      "items": [
+        {
+          "name": "Backpack",
+          "product_id": "1000000003",
+          "item_id": "var_020",
+          "price": 89.99,
+          "options": {"color": "blue", "size": "large"}
+        }
+      ],
+      "status": "delivered",
+      "fulfillments": [
+        {"tracking_id": ["TRK300"], "item_ids": ["var_020"]}
+      ],
+      "payment_history": [
+        {"transaction_type": "payment", "amount": 89.99, "payment_method_id": "credit_card_2001"}
+      ]
+    },
+    "#W0004": {
+      "order_id": "#W0004",
+      "user_id": "alice_wong_789",
+      "address": {
+        "address1": "789 Pine Rd",
+        "address2": "Suite 100",
+        "city": "Seattle",
+        "state": "WA",
+        "country": "USA",
+        "zip": "98101"
+      },
+      "items": [
+        {
+          "name": "Desk Lamp",
+          "product_id": "1000000004",
+          "item_id": "var_030",
+          "price": 49.99,
+          "options": {"color": "white", "brightness": "adjustable"}
+        },
+        {
+          "name": "Laptop",
+          "product_id": "1000000001",
+          "item_id": "var_002",
+          "price": 1199.99,
+          "options": {"color": "silver", "storage": "512GB"}
+        }
+      ],
+      "status": "delivered",
+      "fulfillments": [
+        {"tracking_id": ["TRK400"], "item_ids": ["var_030", "var_002"]}
+      ],
+      "payment_history": [
+        {"transaction_type": "payment", "amount": 1249.98, "payment_method_id": "gift_card_6001"}
+      ]
+    },
+    "#W0005": {
+      "order_id": "#W0005",
+      "user_id": "jane_doe_123",
+      "address": {
+        "address1": "123 Main St",
+        "address2": "Apt 4",
+        "city": "Springfield",
+        "state": "IL",
+        "country": "USA",
+        "zip": "62701"
+      },
+      "items": [
+        {
+          "name": "Backpack",
+          "product_id": "1000000003",
+          "item_id": "var_021",
+          "price": 79.99,
+          "options": {"color": "red", "size": "medium"}
+        }
+      ],
+      "status": "cancelled",
+      "fulfillments": [],
+      "payment_history": [
+        {"transaction_type": "payment", "amount": 79.99, "payment_method_id": "gift_card_5001"},
+        {"transaction_type": "refund", "amount": 79.99, "payment_method_id": "gift_card_5001"}
+      ],
+      "cancel_reason": "no longer needed"
+    }
+  }
+}

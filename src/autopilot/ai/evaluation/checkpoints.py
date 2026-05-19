@@ -2,8 +2,7 @@
 
 from autopilot.ai.evaluation.schemas import CheckpointEvent, CheckpointHeader
 from autopilot.core.errors import AIError, TrackingError
-from autopilot.tracking.io import append_jsonl, read_jsonl
-from datetime import datetime, timezone
+from autopilot.tracking.io import append_jsonl, read_jsonl, utc_now_iso
 from pathlib import Path
 from pydantic import BaseModel
 from typing import Any, Protocol
@@ -12,34 +11,54 @@ from typing import Any, Protocol
 class Checkpointable(Protocol):
   """Protocol for anything that can be checkpointed."""
 
-  def state_dict(self) -> dict[str, Any]: ...
+  def state_dict(self) -> dict[str, Any]:
+    """Return a serializable snapshot of checkpointable state."""
+    ...
 
-  def load_state_dict(self, state_dict: dict[str, Any]) -> None: ...
+  def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+    """Restore state previously produced by :meth:`state_dict`."""
+    ...
 
 
 class CheckpointIO:
   """Storage backend for checkpoints. Default: append-only JSONL."""
 
   def save_event(self, path: Path, event: BaseModel) -> None:
-    """Append a single event to the checkpoint file (incremental)."""
+    """Append a single event to the checkpoint file (incremental).
+
+    Raises:
+      AIError: When JSONL append fails with :class:`TrackingError`.
+    """
     try:
-      append_jsonl(path, event.model_dump())
+      append_jsonl(path, event.model_dump(by_alias=True))
     except TrackingError as exc:
       raise AIError(str(exc)) from exc
 
   def load(self, path: Path) -> list[dict]:
-    """Load all events from checkpoint file."""
+    """Load all events from checkpoint file.
+
+    Returns:
+      List of deserialized JSON objects, one per line in the file.
+
+    Raises:
+      AIError: When JSONL read fails with :class:`TrackingError`.
+    """
     try:
       return read_jsonl(path, strict=True)
     except TrackingError as exc:
       raise AIError(str(exc)) from exc
 
   def remove(self, path: Path) -> None:
-    """Delete a checkpoint file. No error if missing."""
+    """Delete a checkpoint file. No error if missing.
+
+    Raises:
+      AIError: When file removal fails with :class:`OSError`.
+    """
     try:
       path.unlink(missing_ok=True)
     except OSError as exc:
-      raise AIError(f'failed to remove checkpoint at {path}: {exc}') from exc
+      msg = f'failed to remove checkpoint at {path}: {exc}'
+      raise AIError(msg) from exc
 
 
 class CheckpointManager:
@@ -59,15 +78,15 @@ class CheckpointManager:
       self._apply_event(d)
 
   def _apply_event(self, d: dict[str, Any]) -> None:
-    t = d.get('type')
-    if t == 'header':
+    event_type = d.get('type')
+    if event_type == 'header':
       self._header = dict(d)
       self._args = dict(d.get('args', {}))
-    elif t == 'result':
+    elif event_type == 'result':
       eid = d['id']
       if isinstance(eid, str):
         self._completed_ids.add(eid)
-    elif t == 'state':
+    elif event_type == 'state':
       payload = d.get('payload', {})
       if not isinstance(payload, dict):
         payload = {}
@@ -75,15 +94,15 @@ class CheckpointManager:
       if key is not None:
         st = payload.get('state')
         self._states[str(key)] = dict(st) if isinstance(st, dict) else {}
-    elif t == 'args_update':
+    elif event_type == 'args_update':
       upd = d.get('payload', {})
       if isinstance(upd, dict):
         self._args.update(upd)
 
-    if t in ('header', 'state', 'args_update'):
+    if event_type in {'header', 'state', 'args_update'}:
       return
-    if isinstance(t, str):
-      self._summary_counts[t] = self._summary_counts.get(t, 0) + 1
+    if isinstance(event_type, str):
+      self._summary_counts[event_type] = self._summary_counts.get(event_type, 0) + 1
 
   def save_header(
     self,
@@ -95,64 +114,73 @@ class CheckpointManager:
     """Write checkpoint header."""
     merged_args: dict[str, Any] = dict(args) if args is not None else {}
     merged_args.update(kwargs)
-    ts = datetime.now(timezone.utc).isoformat()
     header = CheckpointHeader(
       subsystem=subsystem,
       config_hash=config_hash,
-      created_at=ts,
+      created_at=utc_now_iso(),
       args=merged_args,
     )
     self._io.save_event(self._path, header)
-    self._apply_event(header.model_dump())
+    self._apply_event(header.model_dump(by_alias=True))
 
   def save_event(
     self,
     event_type: str,
-    id: str,
+    item_id: str,
     payload: dict | None = None,
   ) -> None:
     """Incrementally save a single event."""
-    ts = datetime.now(timezone.utc).isoformat()
     pl = dict(payload) if payload is not None else {}
     event = CheckpointEvent(
       type=event_type,
-      id=id,
-      timestamp=ts,
+      id=item_id,
+      timestamp=utc_now_iso(),
       payload=pl,
     )
     self._io.save_event(self._path, event)
-    self._apply_event(event.model_dump())
+    self._apply_event(event.model_dump(by_alias=True))
 
   def save_state(self, key: str, state: dict[str, Any]) -> None:
     """Save arbitrary state."""
     self.save_event(
       'state',
-      id='',
+      item_id='',
       payload={'key': key, 'state': state},
     )
 
   def update_args(self, args: dict[str, Any]) -> None:
     """Update the run args. Saves 'args_update' event."""
-    ts = datetime.now(timezone.utc).isoformat()
     event = CheckpointEvent(
       type='args_update',
       id='',
-      timestamp=ts,
+      timestamp=utc_now_iso(),
       payload=dict(args),
     )
     self._io.save_event(self._path, event)
-    self._apply_event(event.model_dump())
+    self._apply_event(event.model_dump(by_alias=True))
 
-  def is_completed(self, id: str) -> bool:
-    """Check if item was already processed."""
-    return id in self._completed_ids
+  def is_completed(self, item_id: str) -> bool:
+    """Check if item was already processed.
+
+    Returns:
+      True if a prior ``result`` event recorded ``item_id`` as complete.
+    """
+    return item_id in self._completed_ids
 
   def completed_ids(self) -> set[str]:
-    """All IDs with type='result'."""
+    """All IDs with type='result'.
+
+    Returns:
+      Copy of completed item id strings.
+    """
     return set(self._completed_ids)
 
   def load_state(self, key: str) -> dict[str, Any] | None:
-    """Load saved state by key. Returns None if not found."""
+    """Load saved state by key. Returns None if not found.
+
+    Returns:
+      State dict for ``key``, or ``None`` when no ``state`` event exists.
+    """
     if key not in self._states:
       return None
     return dict(self._states[key])
@@ -163,11 +191,19 @@ class CheckpointManager:
     return dict(self._args)
 
   def summary(self) -> dict[str, int]:
-    """Counts by event type (excluding 'header', 'state', 'args_update')."""
+    """Counts by event type (excluding 'header', 'state', 'args_update').
+
+    Returns:
+      Mapping from event type string to occurrence count.
+    """
     return dict(self._summary_counts)
 
   def load_events(self) -> list[dict]:
-    """Load all raw events from the checkpoint file."""
+    """Load all raw events from the checkpoint file.
+
+    Returns:
+      Event dicts as returned by the underlying :class:`CheckpointIO`.
+    """
     return self._io.load(self._path)
 
   @property

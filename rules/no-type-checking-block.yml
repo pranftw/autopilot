@@ -1,0 +1,8 @@
+id: no-type-checking-block
+language: Python
+severity: error
+message: "Do not use 'if TYPE_CHECKING:' blocks. All imports must be unconditional (CLAUDE.md)."
+rule:
+  pattern: |
+    if TYPE_CHECKING:
+      $$$BODY

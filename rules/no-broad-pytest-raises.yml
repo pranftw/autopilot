@@ -1,0 +1,8 @@
+id: no-broad-pytest-raises
+language: Python
+severity: error
+message: "Do not use pytest.raises(Exception). Catch specific exception types instead."
+rule:
+  any:
+    - pattern: pytest.raises(Exception)
+    - pattern: pytest.raises(BaseException)

@@ -72,9 +72,9 @@ AutoPilot isn't just a borrowed analogy; it's a structural equivalent that trans
 
 4. **Run the loop** -- either a manual PyTorch-style `for epoch` loop, or `Trainer.fit()` which handles batching, validation, callbacks, and gradient accumulation automatically.
 
-5. **Wire experiment lifecycle** for production: `Experiment` manages the manifest and optional `Store` for content-addressed snapshots. `StoreCheckpointCallback` auto-snapshots each epoch. `Policy` gates progression and triggers rollback on regression. `Memory` blocks failed strategies so the optimizer doesn't repeat mistakes.
+5. **Wire experiment lifecycle** for production: `Experiment` is a context manager (`with experiment:`) managing lifecycle and optional `Store` for content-addressed snapshots. `StoreCheckpointCallback` auto-snapshots each epoch. `CheckpointCallback` saves training checkpoints for resumption via `fit(ckpt_path=...)`. `Policy` gates progression and triggers rollback on regression.
 
-Two entry points: **library** (import and compose in Python) and **CLI** (`uv run autopilot ...`) for workspace operations -- experiments, store history, memory queries, status, proposals.
+Two entry points: **library** (import and compose in Python) and **CLI** (`uv run autopilot ...`) for workspace operations -- experiments, store history, status, proposals, and diagnostics.
 
 ## Why not just a for loop?
 
@@ -83,9 +83,8 @@ A hand-rolled `for epoch: run(); eval(); if bad: revert()` works for one-off twe
 - **Structured feedback** that tells the optimizer WHERE and WHAT to fix -- `Loss.backward()` produces typed `Gradient` on each `Parameter`, not just "accuracy dropped"
 - **Gradient accumulation** across batches with correct step boundaries -- `accumulate_grad_batches` on `Trainer`, automatic `_should_step` logic in `EpochLoop`
 - **Train/val split discipline** with separate metric phases -- `EpochLoop` switches `module.eval()`, runs `validation_step`, calls `experiment.on_validation_complete` after val
-- **Policy gating with automatic rollback** to the correct epoch via content-addressed snapshots -- `Policy` returns pass/fail; `EpochOrchestrator` calls `experiment.rollback(best_epoch)`
-- **Persistent memory** of what was tried, what failed, and which strategies are blocked -- `FileMemory` with `learn()`, `recall()`, `block_strategy()`
-- **Reproducible experiment records** with manifests, events, and artifacts -- `Experiment` with `JSONLogger`, `JSONCheckpoint`, epoch directories
+- **Policy gating with automatic rollback** to the last passing epoch via content-addressed snapshots -- `Policy` returns pass/fail; `EpochOrchestrator` calls `experiment.rollback(last_accepted_epoch)`
+- **Experiment Records**: Reproducibility and rollback via Forest/Tree persistence, `Experiment.state_dict()`, Logger events, and Store snapshots -- no manual bookkeeping
 - **The same Module** working in both a manual loop and an automated Trainer -- progressive disclosure from explicit to orchestrated
 
 AutoPilot standardizes all of this into a composable protocol with the same separation of Module / Loss / Optimizer / Trainer that made PyTorch productive for ML.
@@ -97,11 +96,11 @@ Like PyTorch + Lightning, AutoPilot offers two orchestration layers:
 **Manual loop (PyTorch-style)** -- full control, plain Python objects:
 
 ```python
-from autopilot.ai.coding import ClaudeCodeAgent
+from autopilot.ai.agents.claude_code import ClaudeCodeAgent
 from autopilot.ai.gradient import ConcatCollator
 from autopilot.ai.loss import JudgeLoss
 from autopilot.ai.optimizer import AgentOptimizer
-from autopilot.core.module import Module
+from autopilot.core.module.module import Module
 
 module = MyModule()
 loss = JudgeLoss(judge=MyJudge(), collator=ConcatCollator())
@@ -117,16 +116,30 @@ for epoch in range(5):
   optimizer.zero_grad()
 ```
 
+**Non-agent optimizer (deterministic)** -- no LLM required:
+
+```python
+from autopilot.core.optimizer import Optimizer
+from autopilot.core.parameter import Parameter
+
+class ThresholdOptimizer(Optimizer):
+  def step(self):
+    for param in self._parameters:
+      if param.grad is not None:
+        old = float(param.data)
+        param.data = str(old + 0.01 * param.grad.value)
+```
+
 **Automated loop (Lightning-style)** -- define steps, let Trainer handle the rest:
 
 ```python
-from autopilot.ai.coding import ClaudeCodeAgent
+from autopilot.ai.agents.claude_code import ClaudeCodeAgent
 from autopilot.ai.optimizer import AgentOptimizer
-from autopilot.core.module import AutoPilotModule
-from autopilot.core.trainer import Trainer
+from autopilot.core.module.autopilot_module import AutoPilotModule
+from autopilot.core.trainer.trainer import Trainer
 
 class MyModule(AutoPilotModule):
-  def training_step(self, batch):
+  def training_step(self, batch, batch_idx):
     return self.forward(batch)
 
   def configure_optimizers(self):
@@ -150,27 +163,50 @@ trainer.fit(module, train_dataloaders=loader, max_epochs=10)
 | `torchmetrics.Metric` | `Metric` |
 | `EarlyStopping` | `Policy` + `Gate` |
 | `ModelCheckpoint` | `Store` + `StoreCheckpointCallback` |
-| Autograd engine | `Graph` / `Node` (propagates arbitrary objects) |
-| `Dataset` / `DataLoader` | `ListDataset` / `DataLoader` |
+| Autograd engine | `Operator` / `Context` (graph via `Datum.grad_fn`; experiment tree uses `core.node.Node` separately) |
+| `Dataset` / `DataLoader` | `Dataset` / `ListDataset` / `DataLoader` |
 | Lightning `Callback` | `Callback` |
 | Lightning `FitLoop` | `Loop` / `EpochLoop` |
-| No equivalent | `Memory` (persistent cross-epoch learning) |
-| No equivalent | `DataGenerator` (structured dataset creation) |
-| No equivalent | `Judge` (structured output scoring) |
+| Data pipeline agent | `GeneratorAgent` (`autopilot.ai.evaluation.generator`) |
+| Evaluation agent | `JudgeAgent` (`autopilot.ai.evaluation.judge`) |
 
 ## Examples
 
 See [examples/](examples/) for runnable, self-contained projects:
 
-- **[textmatch](examples/textmatch/)** -- **Deterministic Rule Optimization.** Optimizes regex rules using a deterministic `RuleOptimizer` and zero LLM calls. Shows the power of the framework without AI.
-- **[protim](examples/protim/)** -- **Agent-Driven Prompt Optimization.** Optimizes a prompt file using `AgentOptimizer` and Claude Code.
+- **[textmatch](examples/textmatch/)** -- Deterministic rule optimization. Optimizes regex rules using a `RuleOptimizer` and zero LLM calls. Shows the framework without AI dependencies.
+- **[protim](examples/protim/)** -- Agent-driven prompt optimization. Optimizes a prompt file using `AgentOptimizer` and Claude Code.
+- **[multi_module](examples/multi_module/)** -- Multi-module trainer example. Uses `Trainer.fit()`, `EvalDatum`, `DataModule`; see [`data.py`](examples/multi_module/data.py).
 
-Each example is its own uv package. Clone, `cd examples/<name>`, `uv sync`, `uv run python run.py`.
+Each example directory is its own `uv` project; run `uv run python run.py` or `uv run python run_trainer.py` per that example's README.
 
 ## Quick start
 
+The repo uses an editable `src/autopilot` layout. From the repo root:
+
 ```bash
 uv sync && uv run autopilot --help
+```
+
+Cold-start CLI sequence (empty disk to first optimization run):
+
+```bash
+uv run autopilot workspace init --context 'initialize workspace'        # create .autopilot/ layout
+uv run autopilot project init myproj --context 'bootstrap project'      # scaffold project skeleton
+uv run autopilot experiment create exp-1 --context 'initial experiment'  # register an experiment
+uv run autopilot optimize train --context 'first training epoch'        # run one training epoch
+```
+
+Minimal Python example:
+
+```python
+from autopilot.core.types import Datum
+from autopilot.data.dataset import ListDataset
+from autopilot.data.dataloader import DataLoader
+
+loader = DataLoader(ListDataset([Datum(), Datum(), Datum()]), batch_size=1)
+batch = next(iter(loader))
+print(batch.id)
 ```
 
 ## Key features
@@ -178,37 +214,106 @@ uv sync && uv run autopilot --help
 - **Uniform, Typed Interface**: Compose systems the same way you compose PyTorch components. No string registries, no YAML configs. Instantiate objects, pass them in, call methods.
 - **Structured Feedback**: `backward()` fills `param.grad` with actionable feedback, not just opaque scores. The optimizer reads `param.grad.render()` and `param.render()` to make targeted fixes.
 - **Real Code/State Versioning**: `FileStore` uses SHA-256 content addressing, snapshot manifests, and atomic writes. `store.checkout(epoch)` restores any previous state.
-- **Persistent Memory**: `FileMemory` records what was tried, what failed, and which strategies are blocked across epochs. `MemoryCallback` captures this automatically.
+- **Experiment History**: Reproducibility and rollback via `Experiment` (context manager with `state_dict()`), Forest/Tree persistence, `Logger` for metrics/events, and `Store` for content-addressed snapshots. `StoreCheckpointCallback` auto-snapshots each epoch. Training checkpoints via `CheckpointIO`/`JSONCheckpointIO` and `Trainer.save_checkpoint`/`fit(ckpt_path=...)`.
 - **Policy Gating**: Use `MinGate`, `MaxGate`, `RangeGate`, and `CustomGate` to enforce quality bars and automate early stopping with rollback.
-- **Experiment Lifecycle**: `Experiment` manages store, lifecycle hooks (`on_epoch_complete`, `on_validation_complete`, `on_loop_complete`), rollback, and best-epoch tracking above the training loop.
+- **Experiment Lifecycle**: `Experiment` is a context manager (`with experiment:`) that manages store, lifecycle hooks (`on_epoch_complete`, `on_validation_complete`), rollback, and last-accepted-epoch tracking above the training loop.
+- **Decision Traceability**: Every mutating action carries an explicit reason via `--context`. Experiments accumulate an append-only decision journal (`ContextLog`) recording why each epoch was accepted, rejected, or rolled back. Internal components (policy gates, optimizer, trainer) emit context entries automatically through a callback hook. Inspect the journal with `experiment show --context-log`.
 - **Production Infrastructure**: Built-in CLI for experiments, project health, dataset management, diagnostics, and audit trails via `--expose`.
 
 ## Key commands
 
 | Command | Role |
 | --- | --- |
+| `workspace` | Workspace layout and management |
+| `project` | Create, list, and check project health |
+| `experiment` | Create, list, and manage experiment slugs |
 | `optimize` | Drive the optimization loop |
 | `ai` | Dataset generation and judging |
-| `experiment` | Create, list, and manage experiment slugs and manifests |
-| `project` | Create, list, and check project health |
 | `store` | Content-addressed code versioning |
 | `status` | Experiment overview (epoch, metrics, stop reason) |
-| `memory` | Query, record, trends, and context |
+| `tree` | Manage exploration trees |
+| `query` | Query experiments with composable filters |
+| `checkout` | Navigate to an experiment (set HEAD + restore state) |
+| `stabilize` | Stabilize experiment results into project root |
+| `execute` | Execute Python code/files/modules with tracking |
+| `debug` | Debug data collection and execution inspection |
 | `diagnose` | Trace diagnostics and node heatmaps |
 | `propose` | Create, verify, revert, and list proposals |
-| `promote` | Promotion decisions and workflow |
+| `policy` | Policy checks and explanations |
+| `dataset` | Dataset registry and splits |
+| `report` | Reports and comparisons |
+| `trace` | Trace collection and inspection |
+
 
 Run `uv run autopilot <command> --help` for subcommands and flags.
 
+## Context and decision traceability
+
+Every mutating CLI command requires `--context 'reason'` explaining why the action is taken. This reason is recorded in two places:
+
+1. **Execution record** (`executions.jsonl`): the `context` field on the dispatch-level `ExecutionRecord`.
+2. **Experiment journal**: when an experiment is active, the reason is appended to the experiment's `ContextLog` via `add_context(source='user')`.
+
+Internal components also emit context entries automatically:
+- **Trainer**: emits on experiment completion and failure.
+- **Policy gates**: emit on epoch accept/reject decisions.
+- **AgentOptimizer**: emits after successful agentic steps with gradient summaries.
+
+Context logs are append-only and JSON-serializable. Inspect them with:
+
+```bash
+uv run autopilot experiment show exp-1 --context-log              # full journal
+uv run autopilot experiment show exp-1 --context-log --context-source policy  # filter by source
+uv run autopilot experiment show exp-1 --context-log --limit 5    # most recent 5 entries
+uv run autopilot debug executions list --context-contains 'rollback'  # search execution records
+```
+
+## What to import
+
+- `from autopilot.core.types import Datum, EvalDatum`
+- `from autopilot.core.module.module import Module`
+- `from autopilot.core.module.autopilot_module import AutoPilotModule`
+- `from autopilot.core.parameter import Parameter`
+- `from autopilot.core.gradient import Gradient`
+- `from autopilot.core.loss import Loss`
+- `from autopilot.core.optimizer import Optimizer`
+- `from autopilot.core.trainer.trainer import Trainer`
+- `from autopilot.core.metric import Metric`
+- `from autopilot.core.experiment import Experiment`
+- `from autopilot.core.store.base import Store`
+- `from autopilot.core.environment import Environment, LocalEnvironment`
+- `from autopilot.core.checkpoint import CheckpointIO, JSONCheckpointIO`
+- `from autopilot.core.callbacks.callback import Callback`
+- `from autopilot.core.loops.epoch import EpochLoop`
+- `from autopilot.data.dataset import ListDataset`
+- `from autopilot.data.dataloader import DataLoader`
+- `from autopilot.data.datamodule import DataModule, Stage`
+- `from autopilot.data.sampler import RandomSampler, SequentialSampler, BatchSampler, WeightedSampler`
+- `from autopilot.ai.parameter import PathParameter`
+- `from autopilot.ai.loss import JudgeLoss`
+- `from autopilot.ai.optimizer import AgentOptimizer`
+- `from autopilot.ai.agents.claude_code import ClaudeCodeAgent`
+- `from autopilot.ai.environment import IsolatedEnvironment`
+- `from autopilot.ai.gradient import ConcatCollator`
+- `from autopilot.ai.evaluation.generator import GeneratorAgent`
+- `from autopilot.ai.evaluation.judge import JudgeAgent`
+- `from autopilot.policy.policy import Policy`
+
 ## Package layout
+
+Development uses `uv sync` / `uv run ...` from the repo root; the editable install matches `[tool.hatch.build.targets.wheel]` / `packages = ["src/autopilot"]`.
 
 ```
 src/autopilot/
-  core/         # Module, Trainer, Loss, Optimizer, Parameter, Gradient, Graph, Metric, Memory, Store, Experiment
-  data/         # Dataset, ListDataset, StreamingDataset, DataLoader, DataModule
-  ai/           # DataGenerator, Judge, Agent, AgentOptimizer, JudgeLoss, TextGradient, GradientCollator, step workflows
-  cli/          # argparse CLI, commands, context, output
-  tracking/     # manifest, events, command history
+  core/         # Module, Trainer, Loss, Optimizer, Parameter, Gradient, Graph, Experiment, Store,
+                # Environment, LocalEnvironment, CheckpointIO, JSONCheckpointIO, Logger, loops, callbacks
+  data/         # Dataset, ListDataset, DataLoader, DataModule, Stage,
+                # Sampler, RandomSampler, BatchSampler, WeightedSampler,
+                # IncrementalSplitter, SplitAssignment
+  ai/           # agents, GeneratorAgent, JudgeAgent, optimizers, loss, gradient,
+                # AutoPilotExperiment, IsolatedEnvironment, MergeAgent, DatasetFingerprint
+  cli/          # argparse entry, commands, context, output
+  tracking/     # I/O helpers (utc_now_iso, read_json_dict, atomic/append), execution tracking
   policy/       # Policy, Gate base classes
 ```
 
@@ -239,8 +344,8 @@ class MyCLI(AutoPilotCLI, project='my-project'):
   def __init__(self):
     super().__init__()
     self.module = my_module
-    self.generator = MyGenerator()
-    self.judge = MyJudge()
+    self.generator = MyGenerator()  # project adapter; canonical eval type is GeneratorAgent
+    self.judge = MyJudge()  # project adapter; canonical eval type is JudgeAgent
 
 
 MyCLI()()

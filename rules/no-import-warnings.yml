@@ -1,0 +1,6 @@
+id: no-import-warnings
+language: Python
+severity: error
+message: Do not import the warnings module. Raise specific exceptions instead of emitting warnings. See CLAUDE.md Prohibited patterns.
+rule:
+  pattern: import warnings

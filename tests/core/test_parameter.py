@@ -1,10 +1,13 @@
 """Tests for Parameter base class."""
 
-from autopilot.core.gradient import Gradient
-from autopilot.core.module import Module
+from autopilot.core.gradient import Gradient, NumericGradient
+from autopilot.core.graph import Graph
+from autopilot.core.module.module import Module
+from autopilot.core.operator import AccumulateGrad
+from autopilot.core.optimizer import Optimizer
 from autopilot.core.parameter import Parameter
 from autopilot.core.types import Datum
-from helpers import NumericGradient
+import copy
 
 
 class TestParameterBase:
@@ -24,7 +27,9 @@ class TestParameterBase:
     p = Parameter()
     p.grad = NumericGradient(value=1.0)
     assert isinstance(p.grad, Gradient)
-    assert p.grad.value == 1.0
+    grad = p.grad
+    assert isinstance(grad, NumericGradient)
+    assert grad.value == 1.0
 
   def test_parameter_to_dict_includes_grad_fields(self) -> None:
     p = Parameter(requires_grad=True)
@@ -33,11 +38,81 @@ class TestParameterBase:
     assert d['requires_grad'] is True
 
   def test_parameter_from_dict_round_trip(self) -> None:
-    p = Parameter(requires_grad=True, metrics={'x': 1.0})
+    p = Parameter(requires_grad=True)
     d = p.to_dict()
     p2 = Parameter.from_dict(d)
     assert p2.requires_grad is True
-    assert p2.metrics == {'x': 1.0}
+    assert p2.id == p.id
+
+
+class TestParameterFromDictHydration:
+  def test_parameter_from_dict_preserves_requires_grad(self) -> None:
+    for rg in (True, False):
+      p = Parameter(requires_grad=rg)
+      data = p.to_dict()
+      restored = Parameter.from_dict(data)
+      assert restored.requires_grad is rg
+      assert restored.id == p.id
+
+  def test_parameter_from_dict_does_not_pop_type(self) -> None:
+    restored = Parameter.from_dict({'value': 'x', 'type': 'prompt'})
+    assert isinstance(restored, Parameter)
+    payload = restored.to_dict()
+    assert 'type' in payload
+    assert payload['type'].endswith('.Parameter')
+
+
+class TestParameterToDictExcludesGrad:
+  """Gradient is transient and excluded from serialization."""
+
+  def test_to_dict_has_no_grad_key(self) -> None:
+    p = Parameter()
+    d = p.to_dict()
+    assert 'grad' not in d
+
+  def test_to_dict_has_no_grad_key_when_grad_set(self) -> None:
+    p = Parameter()
+    p.grad = NumericGradient(value=5.0)
+    d = p.to_dict()
+    assert 'grad' not in d
+
+  def test_to_dict_has_no_grad_key_with_requires_grad_false(self) -> None:
+    p = Parameter(requires_grad=False)
+    p.grad = NumericGradient(value=1.0)
+    d = p.to_dict()
+    assert 'grad' not in d
+
+
+class TestOptimizerZeroGrad:
+  def test_zero_grad_clears_grad_on_trainable_param(self) -> None:
+    p = Parameter(requires_grad=True)
+    p.grad = NumericGradient(value=1.0)
+    opt = Optimizer([p])
+    opt.zero_grad()
+    assert p.grad is None
+
+  def test_zero_grad_clears_grad_on_frozen_param(self) -> None:
+    p = Parameter(requires_grad=False)
+    p.grad = NumericGradient(value=2.0)
+    opt = Optimizer([p])
+    opt.zero_grad()
+    assert p.grad is None
+
+  def test_zero_grad_clears_all_params_mixed(self) -> None:
+    trainable = Parameter(requires_grad=True)
+    frozen = Parameter(requires_grad=False)
+    trainable.grad = NumericGradient(value=1.0)
+    frozen.grad = NumericGradient(value=3.0)
+    opt = Optimizer([trainable, frozen])
+    opt.zero_grad()
+    assert trainable.grad is None
+    assert frozen.grad is None
+
+  def test_zero_grad_noop_on_none_grads(self) -> None:
+    p = Parameter()
+    opt = Optimizer([p])
+    opt.zero_grad()
+    assert p.grad is None
 
 
 class TestParameterModuleIntegration:
@@ -71,3 +146,25 @@ class TestParameterModuleIntegration:
     named = dict(mod.named_parameters())
     assert 'weight' in named
     assert named['weight'] is p
+
+
+class TestParameterDeepcopy:
+  def test_parameter_deepcopy_withgrad_accumulator(self) -> None:
+    p = Parameter(requires_grad=True)
+    g = Graph()
+    AccumulateGrad.get_or_create(p, g)
+    assert p.grad_accumulator is not None
+    c = copy.deepcopy(p)
+    assert isinstance(c, Parameter)
+    assert c.grad_accumulator is None
+    assert c.requires_grad is True
+
+  def test_parameter_clone_withgrad_accumulator(self) -> None:
+    p = Parameter(requires_grad=True)
+    g = Graph()
+    AccumulateGrad.get_or_create(p, g)
+    assert p.grad_accumulator is not None
+    c = p.clone()
+    assert isinstance(c, Parameter)
+    assert c.grad_accumulator is None
+    assert c.requires_grad is True

@@ -1,0 +1,7 @@
+id: no-noqa-comments
+language: Python
+severity: error
+message: "# noqa comments are banned. Fix the violation instead."
+rule:
+  kind: comment
+  regex: "noqa"

@@ -1,531 +1,786 @@
-"""Tests for Experiment lifecycle class."""
+"""Tests for new base Experiment entity with lifecycle state transitions."""
 
-from autopilot.core.artifacts.artifact import JSONArtifact, JSONLArtifact
-from autopilot.core.checkpoint import Checkpoint, JSONCheckpoint
+from autopilot.core.enums import Status
 from autopilot.core.errors import ExperimentError
-from autopilot.core.experiment import Experiment, PromotionExperiment
-from autopilot.core.logger import JSONLogger, Logger
-from autopilot.core.models import Manifest
-from pathlib import Path
-from unittest.mock import MagicMock
+from autopilot.core.experiment import Experiment
+from typing import Any
 import pytest
 
 
-def _make_experiment(tmp_path: Path, slug: str = 'test-1', **kwargs) -> Experiment:
-  """Helper: creates an Experiment with default JSON logger/checkpoint."""
-  return Experiment(
-    tmp_path,
-    slug=slug,
-    logger=kwargs.pop('logger', JSONLogger(tmp_path)),
-    checkpoint=kwargs.pop('checkpoint', JSONCheckpoint()),
-    **kwargs,
-  )
+class TestExperimentCreation:
+  def test_create_with_id(self) -> None:
+    exp = Experiment(experiment_id='test-1')
+    assert exp.id == 'test-1'
 
+  def test_create_with_hypothesis(self) -> None:
+    exp = Experiment(experiment_id='test-1', hypothesis='test hypothesis')
+    assert exp.hypothesis == 'test hypothesis'
 
-def _make_promotion(tmp_path: Path, slug: str = 'test-1', **kwargs) -> PromotionExperiment:
-  """Helper: creates a PromotionExperiment."""
-  return PromotionExperiment(
-    tmp_path,
-    slug=slug,
-    logger=kwargs.pop('logger', JSONLogger(tmp_path)),
-    checkpoint=kwargs.pop('checkpoint', JSONCheckpoint()),
-    **kwargs,
-  )
+  def test_hypothesis_default_none(self) -> None:
+    exp = Experiment(experiment_id='test-1')
+    assert exp.hypothesis is None
 
+  def test_default_status_pending(self) -> None:
+    exp = Experiment(experiment_id='test-1')
+    assert exp.status == Status.pending
 
-class TestExperimentBase:
-  def test_create_new(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path, title='Test One')
-    assert exp.slug == 'test-1'
-    assert exp.epoch == 0
-    assert not exp.is_decided
-    assert (tmp_path / 'manifest.json').exists()
+  def test_default_metrics_empty(self) -> None:
+    exp = Experiment(experiment_id='test-1')
+    assert exp.metrics == {}
 
-  def test_reload_existing(self, tmp_path: Path) -> None:
-    exp1 = _make_experiment(tmp_path)
-    exp1.advance_epoch()
-    exp2 = _make_experiment(tmp_path)
-    assert exp2.epoch == 1
+  def test_default_epoch_minus_one(self) -> None:
+    exp = Experiment(experiment_id='test-1')
+    assert exp.epoch == -1
 
-  def test_advance_epoch(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    assert exp.advance_epoch() == 1
-    assert exp.advance_epoch() == 2
-    assert exp.epoch == 2
+  def test_created_at_set_automatically(self) -> None:
+    exp = Experiment(experiment_id='test-1')
+    assert exp.created_at is not None
+    assert 'T' in exp.created_at
 
-  def test_on_epoch_advance_hook(self, tmp_path: Path) -> None:
-    epochs_seen: list[int] = []
+  def test_default_notes_none(self) -> None:
+    exp = Experiment(experiment_id='test-1')
+    assert exp.notes is None
 
-    class HookExp(Experiment):
-      def on_epoch_advance(self, epoch: int) -> None:
-        epochs_seen.append(epoch)
+  def test_default_error_none(self) -> None:
+    exp = Experiment(experiment_id='test-1')
+    assert exp.error is None
 
-    exp = HookExp(
-      tmp_path,
-      slug='test-1',
-      logger=JSONLogger(tmp_path),
-      checkpoint=JSONCheckpoint(),
-    )
-    exp.advance_epoch()
-    exp.advance_epoch()
-    assert epochs_seen == [1, 2]
+  def test_default_timestamps_none(self) -> None:
+    exp = Experiment(experiment_id='test-1')
+    assert exp.started_at is None
+    assert exp.completed_at is None
+    assert exp.failed_at is None
+    assert exp.cancelled_at is None
 
-  def test_finalize(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    exp.finalize('success')
-    assert (tmp_path / 'events.jsonl').exists()
-
-  def test_on_finalize_hook(self, tmp_path: Path) -> None:
-    statuses: list[str] = []
-
-    class HookExp(Experiment):
-      def on_finalize(self, status: str) -> None:
-        statuses.append(status)
-
-    exp = HookExp(
-      tmp_path,
-      slug='test-1',
-      logger=JSONLogger(tmp_path),
-      checkpoint=JSONCheckpoint(),
-    )
-    exp.finalize('success')
-    assert statuses == ['success']
-
-  def test_decision_none_initially(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    assert exp.decision is None
-
-  def test_is_decided_false_initially(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    assert not exp.is_decided
-
-  def test_decide_persists(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    exp.decide('accepted', 'looks good')
-    assert exp.decision == 'accepted'
-    assert exp.decision_reason == 'looks good'
-
-  def test_decide_logs_event(self, tmp_path: Path) -> None:
-    class TrackingLogger(Logger):
-      def __init__(self):
-        self.calls: list[tuple] = []
-
-      def log(self, event_type, message='', metadata=None):
-        self.calls.append((event_type, message, metadata))
-
-    logger = TrackingLogger()
-    exp = Experiment(
-      tmp_path,
-      slug='test-1',
-      logger=logger,
-      checkpoint=JSONCheckpoint(),
-    )
-    exp.decide('accepted', 'reason here', extra='data')
-    assert any(c[0] == 'accepted' for c in logger.calls)
-
-  def test_decide_one_shot(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    exp.decide('accepted', 'first')
-    with pytest.raises(ExperimentError, match='already decided'):
-      exp.decide('rejected', 'second')
-
-  def test_decide_unrestricted_by_default(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    exp.decide('any_string', 'reason')
-    assert exp.decision == 'any_string'
-
-  def test_decide_validates_against_valid_decisions(self, tmp_path: Path) -> None:
-    class RestrictedExp(Experiment):
-      def valid_decisions(self) -> frozenset[str]:
-        return frozenset({'go', 'nogo'})
-
-    exp = RestrictedExp(
-      tmp_path,
-      slug='test-1',
-      logger=JSONLogger(tmp_path),
-      checkpoint=JSONCheckpoint(),
-    )
-    with pytest.raises(ExperimentError, match='invalid decision'):
-      exp.decide('invalid', 'reason')
-
-  def test_valid_decisions_default_none(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    assert exp.valid_decisions() is None
-
-  def test_state_dict_round_trip(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path, idea='my idea')
-    exp.advance_epoch()
-    state = exp.state_dict()
-    exp2 = _make_experiment(tmp_path / 'other', slug='other')
-    exp2.load_state_dict(state)
-    assert exp2.epoch == 1
-
-  def test_dir_property(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    assert exp.dir == tmp_path
-
-  def test_logger_property(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    assert isinstance(exp.logger, JSONLogger)
-
-  def test_manifest_property(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path, idea='my idea')
-    assert exp.manifest.idea == 'my idea'
-
-  def test_repr_without_decision(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
+  def test_repr(self) -> None:
+    exp = Experiment(experiment_id='test-1')
     r = repr(exp)
     assert 'test-1' in r
-    assert 'epoch=0' in r
-
-  def test_repr_with_decision(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    exp.decide('accepted', 'ok')
-    r = repr(exp)
-    assert 'accepted' in r
-
-  def test_metadata_passthrough(self, tmp_path: Path) -> None:
-    exp = _make_experiment(
-      tmp_path,
-      metadata={'profile': 'default', 'target': 'pipeline-v3'},
-    )
-    assert exp.manifest.metadata['profile'] == 'default'
-
-  def test_logger_and_checkpoint_required(self) -> None:
-    with pytest.raises(TypeError):
-      Experiment(Path('/tmp/x'), slug='test-1')
+    assert 'pending' in r
 
 
-class TestArtifactRegistration:
-  def test_setattr_registers_artifact(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    art = JSONArtifact('test.json')
-    exp.events = art
-    assert exp.artifacts['events'] is art
+class TestIsTerminal:
+  def test_pending_not_terminal(self) -> None:
+    exp = Experiment(experiment_id='t')
+    assert exp.is_terminal is False
 
-  def test_setattr_ignores_non_artifacts(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    exp.foo = 'bar'
-    assert 'foo' not in exp.artifacts
+  def test_running_not_terminal(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    assert exp.is_terminal is False
 
-  def test_artifacts_property(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    art = JSONArtifact('test.json')
-    exp.data = art
-    artifacts = exp.artifacts
-    assert 'data' in artifacts
-    assert artifacts is not exp._artifacts
+  def test_completed_is_terminal(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.complete()
+    assert exp.is_terminal is True
 
-  def test_multiple_artifacts(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    exp.a = JSONArtifact('a.json')
-    exp.b = JSONLArtifact('b.jsonl')
-    assert len(exp.artifacts) == 2
+  def test_failed_is_terminal(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.fail()
+    assert exp.is_terminal is True
 
-  def test_artifact_replace(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    exp.a = JSONArtifact('old.json')
-    exp.a = JSONArtifact('new.json')
-    assert exp.artifacts['a'].filename == 'new.json'
+  def test_cancelled_is_terminal(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.cancel()
+    assert exp.is_terminal is True
 
 
-class TestExperimentCustomSubclass:
-  def test_custom_valid_decisions(self, tmp_path: Path) -> None:
-    class ABTest(Experiment):
-      def valid_decisions(self) -> frozenset[str]:
-        return frozenset({'winner', 'loser', 'inconclusive'})
+class TestStartTransition:
+  def test_start_from_pending(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    assert exp.status == Status.running
 
-    exp = ABTest(
-      tmp_path,
-      slug='ab-1',
-      logger=JSONLogger(tmp_path),
-      checkpoint=JSONCheckpoint(),
-    )
-    exp.decide('winner', 'significant results')
-    assert exp.decision == 'winner'
+  def test_start_sets_started_at(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    assert exp.started_at is not None
 
-  def test_custom_hooks(self, tmp_path: Path) -> None:
-    events: list[str] = []
+  def test_start_from_running_raises(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    with pytest.raises(ExperimentError, match='cannot start'):
+      exp.start()
 
-    class HookExp(Experiment):
-      def on_epoch_advance(self, epoch: int) -> None:
-        events.append(f'epoch_{epoch}')
+  def test_start_from_completed_raises(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.complete()
+    with pytest.raises(ExperimentError, match='cannot start'):
+      exp.start()
 
-      def on_finalize(self, status: str) -> None:
-        events.append(f'finalize_{status}')
+  def test_start_from_failed_raises(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.fail()
+    with pytest.raises(ExperimentError, match='cannot start'):
+      exp.start()
 
-    exp = HookExp(
-      tmp_path,
-      slug='test-1',
-      logger=JSONLogger(tmp_path),
-      checkpoint=JSONCheckpoint(),
-    )
+  def test_start_from_cancelled_raises(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.cancel()
+    with pytest.raises(ExperimentError, match='cannot start'):
+      exp.start()
+
+
+class TestCompleteTransition:
+  def test_complete_from_running(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.complete()
+    assert exp.status == Status.completed
+
+  def test_complete_sets_completed_at(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.complete()
+    assert exp.completed_at is not None
+
+  def test_complete_with_metrics(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.complete(metrics={'accuracy': 0.9})
+    assert exp.metrics == {'accuracy': 0.9}
+
+  def test_complete_without_metrics_preserves_existing(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.metrics = {'loss': 0.1}
+    exp.complete()
+    assert exp.metrics == {'loss': 0.1}
+
+  def test_complete_from_pending_succeeds(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.complete({'x': 1.0})
+    assert exp.status == Status.completed
+    assert exp.metrics == {'x': 1.0}
+
+  def test_complete_from_completed_raises(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.complete()
+    with pytest.raises(ExperimentError, match='cannot complete'):
+      exp.complete()
+
+  def test_complete_from_failed_raises(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.fail()
+    with pytest.raises(ExperimentError, match='cannot complete'):
+      exp.complete()
+
+  def test_complete_from_cancelled_raises(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.cancel()
+    with pytest.raises(ExperimentError, match='cannot complete'):
+      exp.complete()
+
+
+class TestFailTransition:
+  def test_fail_from_running(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.fail()
+    assert exp.status == Status.failed
+
+  def test_fail_sets_failed_at(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.fail()
+    assert exp.failed_at is not None
+
+  def test_fail_with_error(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.fail(error='something broke')
+    assert exp.error == 'something broke'
+
+  def test_fail_without_error_leaves_none(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.fail()
+    assert exp.error is None
+
+  def test_fail_from_pending_succeeds(self) -> None:
+    """BUG-DFV1-002: fail() accepts pending status for CLI-only workflows."""
+    exp = Experiment(experiment_id='t')
+    exp.fail('test reason')
+    assert exp.status == Status.failed
+    assert exp.error == 'test reason'
+    assert exp.failed_at is not None
+
+  def test_fail_from_pending_stores_error_and_timestamp(self) -> None:
+    """BUG-DFV1-002: fail from pending sets error and failed_at correctly."""
+    exp = Experiment(experiment_id='t')
+    exp.fail('data was corrupted')
+    assert exp.error == 'data was corrupted'
+    assert exp.failed_at is not None
+    assert exp.started_at is None
+
+  def test_fail_from_completed_raises(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.complete()
+    with pytest.raises(ExperimentError, match='cannot fail'):
+      exp.fail()
+
+  def test_fail_from_failed_raises(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.fail()
+    with pytest.raises(ExperimentError, match='cannot fail'):
+      exp.fail()
+
+  def test_fail_from_cancelled_raises(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.cancel()
+    with pytest.raises(ExperimentError, match='cannot fail'):
+      exp.fail()
+
+
+class TestCancelTransition:
+  def test_cancel_from_pending(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.cancel()
+    assert exp.status == Status.cancelled
+
+  def test_cancel_from_running(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.cancel()
+    assert exp.status == Status.cancelled
+
+  def test_cancel_sets_cancelled_at(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.cancel()
+    assert exp.cancelled_at is not None
+
+  def test_cancel_from_completed_raises(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.complete()
+    with pytest.raises(ExperimentError, match='cannot cancel'):
+      exp.cancel()
+
+  def test_cancel_from_failed_raises(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.fail()
+    with pytest.raises(ExperimentError, match='cannot cancel'):
+      exp.cancel()
+
+  def test_cancel_from_cancelled_raises(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.cancel()
+    with pytest.raises(ExperimentError, match='cannot cancel'):
+      exp.cancel()
+
+
+class TestAdvanceEpoch:
+  def test_advance_increments_epoch(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
     exp.advance_epoch()
-    exp.finalize('success')
-    assert events == ['epoch_1', 'finalize_success']
+    assert exp.epoch == 0
 
-  def test_re_decidable_experiment(self, tmp_path: Path) -> None:
-    class ReDecidable(Experiment):
-      def decide(self, decision: str, reason: str, **kwargs) -> None:
-        self._manifest.decision = decision
-        self._manifest.decision_reason = reason
-        self._checkpoint.save_manifest(self._dir, self._manifest)
+  def test_advance_multiple(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.advance_epoch()
+    exp.advance_epoch()
+    exp.advance_epoch()
+    assert exp.epoch == 2
 
-    exp = ReDecidable(
-      tmp_path,
-      slug='test-1',
-      logger=JSONLogger(tmp_path),
-      checkpoint=JSONCheckpoint(),
-    )
-    exp.decide('first', 'reason1')
-    exp.decide('second', 'reason2')
-    assert exp.decision == 'second'
+  def test_advance_with_metrics(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.advance_epoch(metrics={'accuracy': 0.7})
+    assert exp.metrics == {'accuracy': 0.7}
 
-  def test_custom_logger_integration(self, tmp_path: Path) -> None:
-    class MyLogger(Logger):
-      def __init__(self):
-        self.calls: list[str] = []
+  def test_advance_without_metrics_preserves_existing(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.metrics = {'loss': 0.5}
+    exp.advance_epoch()
+    assert exp.metrics == {'loss': 0.5}
 
-      def log(self, event_type, message='', metadata=None):
-        self.calls.append(event_type)
+  def test_advance_from_pending_raises(self) -> None:
+    exp = Experiment(experiment_id='t')
+    with pytest.raises(ExperimentError, match='cannot advance epoch'):
+      exp.advance_epoch()
 
-    logger = MyLogger()
-    Experiment(tmp_path / 'exp', slug='test-1', logger=logger, checkpoint=JSONCheckpoint())
-    assert 'experiment_created' in logger.calls
+  def test_advance_from_completed_raises(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.complete()
+    with pytest.raises(ExperimentError, match='cannot advance epoch'):
+      exp.advance_epoch()
 
-  def test_custom_checkpoint_integration(self, tmp_path: Path) -> None:
-    class MyCheckpoint(Checkpoint):
-      def __init__(self):
-        self.saved: list[Manifest] = []
+  def test_advance_from_failed_raises(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.fail()
+    with pytest.raises(ExperimentError, match='cannot advance epoch'):
+      exp.advance_epoch()
 
-      def save_manifest(self, experiment_dir, manifest):
-        self.saved.append(manifest)
-
-      def load_manifest(self, experiment_dir):
-        return self.saved[-1] if self.saved else None
-
-      def exists(self, experiment_dir):
-        return bool(self.saved)
-
-    cp = MyCheckpoint()
-    Experiment(tmp_path / 'exp', slug='test-1', logger=JSONLogger(tmp_path / 'exp'), checkpoint=cp)
-    assert len(cp.saved) == 1
-    assert cp.saved[0].slug == 'test-1'
+  def test_advance_from_cancelled_raises(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.cancel()
+    with pytest.raises(ExperimentError, match='cannot advance epoch'):
+      exp.advance_epoch()
 
 
-class TestPromotionExperiment:
-  def test_valid_decisions_frozenset(self, tmp_path: Path) -> None:
-    exp = _make_promotion(tmp_path)
-    assert exp.valid_decisions() == frozenset({'promoted', 'rejected'})
-
-  def test_promote_delegates_to_decide(self, tmp_path: Path) -> None:
-    exp = _make_promotion(tmp_path)
-    exp.promote('accuracy improved by 5%')
-    assert exp.decision == 'promoted'
-    assert exp.decision_reason == 'accuracy improved by 5%'
-
-  def test_reject_delegates_to_decide(self, tmp_path: Path) -> None:
-    exp = _make_promotion(tmp_path)
-    exp.reject('regression detected')
-    assert exp.decision == 'rejected'
-    assert exp.decision_reason == 'regression detected'
-
-  def test_promote_without_reason_raises(self, tmp_path: Path) -> None:
-    exp = _make_promotion(tmp_path)
-    with pytest.raises(TypeError):
-      exp.promote()
-
-  def test_reject_without_reason_raises(self, tmp_path: Path) -> None:
-    exp = _make_promotion(tmp_path)
-    with pytest.raises(TypeError):
-      exp.reject()
-
-  def test_is_promoted(self, tmp_path: Path) -> None:
-    exp = _make_promotion(tmp_path)
-    exp.promote('good')
-    assert exp.is_promoted
-
-  def test_is_rejected(self, tmp_path: Path) -> None:
-    exp = _make_promotion(tmp_path)
-    exp.reject('bad')
-    assert exp.is_rejected
-
-  def test_invalid_decision_raises(self, tmp_path: Path) -> None:
-    exp = _make_promotion(tmp_path)
-    with pytest.raises(ExperimentError, match='invalid decision'):
-      exp.decide('invalid', 'reason')
-
-  def test_double_promote_raises(self, tmp_path: Path) -> None:
-    exp = _make_promotion(tmp_path)
-    exp.promote('first')
-    with pytest.raises(ExperimentError, match='already decided'):
-      exp.promote('second')
-
-  def test_reload_preserves_promote(self, tmp_path: Path) -> None:
-    exp1 = _make_promotion(tmp_path)
-    exp1.promote('good results')
-    exp2 = _make_promotion(tmp_path)
-    assert exp2.is_promoted
-    assert exp2.decision == 'promoted'
-
-  def test_reload_preserves_reject(self, tmp_path: Path) -> None:
-    exp1 = _make_promotion(tmp_path)
-    exp1.reject('bad results')
-    exp2 = _make_promotion(tmp_path)
-    assert exp2.is_rejected
-
-  def test_promote_kwargs_in_metadata(self, tmp_path: Path) -> None:
-    exp = _make_promotion(tmp_path)
-    exp.promote('good', extra='data')
-    assert exp.is_promoted
+class TestOnLoopCompleteRemoved:
+  def test_no_on_loop_complete_method(self) -> None:
+    exp = Experiment(experiment_id='t')
+    assert not hasattr(exp, 'on_loop_complete')
 
 
-class TestExperimentStoreAndRollback:
-  def test_store_on_experiment(self, tmp_path: Path) -> None:
-    store = MagicMock()
-    exp = _make_experiment(tmp_path, store=store)
-    assert exp.store is store
+class TestStateDict:
+  def test_state_dict_contains_all_fields(self) -> None:
+    exp = Experiment(experiment_id='test-1', hypothesis='h')
+    state = exp.state_dict()
+    assert state['id'] == 'test-1'
+    assert state['hypothesis'] == 'h'
+    assert state['status'] == 'pending'
+    assert state['metrics'] == {}
+    assert state['notes'] is None
+    assert state['epoch'] == -1
+    assert state['error'] is None
+    assert state['created_at'] is not None
+    assert state['started_at'] is None
+    assert state['completed_at'] is None
+    assert state['failed_at'] is None
+    assert state['cancelled_at'] is None
+    assert state['last_accepted_epoch'] is None
 
-  def test_store_none_by_default(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    assert exp.store is None
+  def test_state_dict_status_as_string(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    state = exp.state_dict()
+    assert state['status'] == 'running'
+    assert isinstance(state['status'], str)
 
-  def test_should_rollback_default_false(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    assert exp.should_rollback is False
+  def test_load_state_dict_restores_all(self) -> None:
+    exp = Experiment(experiment_id='t', hypothesis='h')
+    exp.start()
+    exp.advance_epoch(metrics={'accuracy': 0.8})
+    exp.notes = 'some note'
+    state = exp.state_dict()
 
-  def test_should_rollback_settable(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    exp.should_rollback = True
-    assert exp.should_rollback is True
+    exp2 = Experiment(experiment_id='placeholder')
+    exp2.load_state_dict(state)
+    assert exp2.id == 't'
+    assert exp2.hypothesis == 'h'
+    assert exp2.status == Status.running
+    assert exp2.metrics == {'accuracy': 0.8}
+    assert exp2.notes == 'some note'
+    assert exp2.epoch == 0
+    assert exp2.started_at == exp.started_at
 
-  def test_best_epoch_default_zero(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    assert exp.best_epoch == 0
+  def test_round_trip(self) -> None:
+    exp = Experiment(experiment_id='round-trip', hypothesis='test')
+    exp.start()
+    exp.advance_epoch(metrics={'loss': 0.3})
+    exp.complete(metrics={'accuracy': 0.95, 'loss': 0.2})
+    state = exp.state_dict()
 
-  def test_best_epoch_settable(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    exp.best_epoch = 5
-    assert exp.best_epoch == 5
+    exp2 = Experiment(experiment_id='temp')
+    exp2.load_state_dict(state)
+    assert exp2.state_dict() == state
 
-  def test_rollback_calls_store_checkout(self, tmp_path: Path) -> None:
-    store = MagicMock()
-    exp = _make_experiment(tmp_path, store=store)
-    exp.rollback(3)
-    store.checkout.assert_called_once_with(3)
+  def test_status_survives_round_trip(self) -> None:
+    for status_method in ['start', 'cancel']:
+      exp = Experiment(experiment_id='t')
+      if status_method == 'start':
+        exp.start()
+      else:
+        exp.cancel()
+      state = exp.state_dict()
+      exp2 = Experiment(experiment_id='temp')
+      exp2.load_state_dict(state)
+      assert exp2.status == exp.status
 
-  def test_rollback_without_store_noop(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    exp.rollback(3)
+  def test_completed_status_round_trip(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.complete(metrics={'m': 1.0})
+    state = exp.state_dict()
+    exp2 = Experiment(experiment_id='temp')
+    exp2.load_state_dict(state)
+    assert exp2.status == Status.completed
+    assert exp2.metrics == {'m': 1.0}
 
-  def test_rollback_epoch_zero_noop(self, tmp_path: Path) -> None:
-    store = MagicMock()
-    exp = _make_experiment(tmp_path, store=store)
-    exp.rollback(0)
-    store.checkout.assert_not_called()
-
-
-class TestExperimentLifecycleHooks:
-  def test_on_epoch_complete_default_noop(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    exp.on_epoch_complete(1, {'accuracy': 0.8})
-
-  def test_on_validation_complete_default_noop(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    exp.on_validation_complete(1, {'accuracy': 0.8})
-
-  def test_on_loop_complete_default_noop(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    exp.on_loop_complete({'total_epochs': 3})
-
-  def test_build_summary_default_passthrough(self, tmp_path: Path) -> None:
-    exp = _make_experiment(tmp_path)
-    loop_result = {'epochs': [], 'total_epochs': 0}
-    assert exp.build_summary(loop_result) is loop_result
+  def test_failed_status_round_trip(self) -> None:
+    exp = Experiment(experiment_id='t')
+    exp.start()
+    exp.fail(error='boom')
+    state = exp.state_dict()
+    exp2 = Experiment(experiment_id='temp')
+    exp2.load_state_dict(state)
+    assert exp2.status == Status.failed
+    assert exp2.error == 'boom'
 
 
-class TestPromotionExperimentDomain:
-  def test_on_validation_complete_first_epoch_writes_baseline(self, tmp_path: Path) -> None:
-    exp = _make_promotion(tmp_path)
-    exp.on_validation_complete(1, {'accuracy': 0.8})
-    baseline = exp._read_baseline()
-    assert baseline == {'accuracy': 0.8}
-    assert exp.should_rollback is False
+class TestFullTransitionMatrix:
+  """Parametrized test covering the entire invalid transition matrix."""
 
-  def test_validation_complete_detects_regression(self, tmp_path: Path) -> None:
-    exp = _make_promotion(tmp_path)
-    exp.on_validation_complete(1, {'accuracy': 0.8})
-    exp.on_validation_complete(2, {'accuracy': 0.5})
-    assert exp.should_rollback is True
+  @pytest.mark.parametrize(
+    ('setup_status', 'method', 'expected_match'),
+    [
+      ('running', 'start', 'cannot start'),
+      ('completed', 'start', 'cannot start'),
+      ('failed', 'start', 'cannot start'),
+      ('cancelled', 'start', 'cannot start'),
+      ('completed', 'complete', 'cannot complete'),
+      ('failed', 'complete', 'cannot complete'),
+      ('cancelled', 'complete', 'cannot complete'),
+      ('completed', 'fail', 'cannot fail'),
+      ('failed', 'fail', 'cannot fail'),
+      ('cancelled', 'fail', 'cannot fail'),
+      ('completed', 'cancel', 'cannot cancel'),
+      ('failed', 'cancel', 'cannot cancel'),
+      ('cancelled', 'cancel', 'cannot cancel'),
+      ('pending', 'advance_epoch', 'cannot advance epoch'),
+      ('completed', 'advance_epoch', 'cannot advance epoch'),
+      ('failed', 'advance_epoch', 'cannot advance epoch'),
+      ('cancelled', 'advance_epoch', 'cannot advance epoch'),
+    ],
+  )
+  def test_invalid_transition(self, setup_status: str, method: str, expected_match: str) -> None:
+    exp = Experiment(experiment_id='t')
+    if setup_status == 'running':
+      exp.start()
+    elif setup_status == 'completed':
+      exp.start()
+      exp.complete()
+    elif setup_status == 'failed':
+      exp.start()
+      exp.fail()
+    elif setup_status == 'cancelled':
+      exp.cancel()
 
-  def test_on_validation_complete_updates_baseline_on_improvement(self, tmp_path: Path) -> None:
-    exp = _make_promotion(tmp_path)
-    exp.on_validation_complete(1, {'accuracy': 0.7})
-    exp.on_validation_complete(2, {'accuracy': 0.9})
-    baseline = exp._read_baseline()
-    assert baseline == {'accuracy': 0.9}
-    assert exp.should_rollback is False
-    assert exp.best_epoch == 2
+    with pytest.raises(ExperimentError, match=expected_match):
+      getattr(exp, method)()
 
-  def test_on_regression_hook_called(self, tmp_path: Path) -> None:
-    hooks: list[tuple] = []
 
-    class TrackingPromo(PromotionExperiment):
-      def on_regression(self, epoch, comparison):
-        hooks.append(('regression', epoch))
+class TestContextManagerNormalExit:
+  def test_context_manager_normal_exit_completes(self) -> None:
+    exp = Experiment(experiment_id='cm-ok')
+    with exp:
+      assert exp.status == Status.running
+    assert exp.status == Status.completed
+    assert exp.completed_at is not None
 
-    exp = TrackingPromo(
-      tmp_path,
-      slug='test-1',
-      logger=JSONLogger(tmp_path),
-      checkpoint=JSONCheckpoint(),
-    )
-    exp.on_validation_complete(1, {'accuracy': 0.8})
-    exp.on_validation_complete(2, {'accuracy': 0.5})
-    assert hooks == [('regression', 2)]
+  def test_context_manager_returns_self(self) -> None:
+    exp = Experiment(experiment_id='cm-self')
+    with exp as ctx:
+      assert ctx is exp
 
-  def test_on_improvement_hook_called(self, tmp_path: Path) -> None:
-    hooks: list[tuple] = []
 
-    class TrackingPromo(PromotionExperiment):
-      def on_improvement(self, epoch, metrics):
-        hooks.append(('improvement', epoch))
+class TestContextManagerExceptionExit:
+  def test_context_manager_exception_exit_fails(self) -> None:
+    exp = Experiment(experiment_id='cm-fail')
+    msg = 'boom'
+    with pytest.raises(RuntimeError, match=msg), exp:
+      raise RuntimeError(msg)
+    assert exp.status == Status.failed
+    assert exp.error == 'boom'
 
-    exp = TrackingPromo(
-      tmp_path,
-      slug='test-1',
-      logger=JSONLogger(tmp_path),
-      checkpoint=JSONCheckpoint(),
-    )
-    exp.on_validation_complete(1, {'accuracy': 0.7})
-    exp.on_validation_complete(2, {'accuracy': 0.9})
-    assert hooks == [('improvement', 2)]
+  def test_context_manager_preserves_error_message(self) -> None:
+    exp = Experiment(experiment_id='cm-msg')
+    msg = 'details'
+    with pytest.raises(ValueError, match=msg), exp:
+      raise ValueError(msg)
+    assert exp.error == 'details'
 
-  def test_comparison_artifact_written_each_epoch(self, tmp_path: Path) -> None:
-    exp = _make_promotion(tmp_path)
-    exp.on_validation_complete(1, {'accuracy': 0.7})
-    exp.on_validation_complete(2, {'accuracy': 0.9})
-    data = exp.comparison_artifact.read(tmp_path, epoch=2)
-    assert data is not None
-    assert data['epoch'] == 2
 
-  def test_threshold_pct_passed_to_compare(self, tmp_path: Path) -> None:
-    exp = _make_promotion(tmp_path, threshold_pct=0.5)
-    exp.on_validation_complete(1, {'accuracy': 0.8})
-    exp.on_validation_complete(2, {'accuracy': 0.79})
-    assert exp.should_rollback is False
+class TestContextManagerExitNoSuppress:
+  def test_exception_propagates_through_context_manager(self) -> None:
+    exp = Experiment(experiment_id='cm-propagate')
+    msg = 'not suppressed'
+    with pytest.raises(RuntimeError, match=msg), exp:
+      raise RuntimeError(msg)
 
-  def test_decision_semantics_unchanged(self, tmp_path: Path) -> None:
-    exp = _make_promotion(tmp_path)
-    exp.promote('good results')
-    assert exp.is_promoted
-    assert exp.decision == 'promoted'
+  def test_exit_returns_false_directly(self) -> None:
+    exp = Experiment(experiment_id='cm-ret')
+    exp.start()
+    result = exp.__exit__(None, None, None)
+    assert result is False
 
-  def test_store_rollback_on_should_rollback(self, tmp_path: Path) -> None:
-    store = MagicMock()
-    exp = _make_promotion(tmp_path, store=store)
-    exp.on_validation_complete(1, {'accuracy': 0.8})
-    exp.best_epoch = 1
-    exp.should_rollback = True
-    exp.rollback(exp.best_epoch)
-    store.checkout.assert_called_once_with(1)
+  def test_exit_returns_false_on_exception(self) -> None:
+    exp = Experiment(experiment_id='cm-ret-exc')
+    exp.start()
+    exc = RuntimeError('test')
+    result = exp.__exit__(type(exc), exc, None)
+    assert result is False
+
+
+class TestContextManagerGuardAlreadyCompleted:
+  def test_guard_skips_when_already_completed(self) -> None:
+    exp = Experiment(experiment_id='cm-guard-c')
+    exp.start()
+    exp.complete()
+    result = exp.__exit__(None, None, None)
+    assert result is False
+    assert exp.status == Status.completed
+
+  def test_no_experiment_error_when_already_completed(self) -> None:
+    exp = Experiment(experiment_id='cm-guard-c2')
+    exp.start()
+    exp.complete(metrics={'x': 1.0})
+    exp.__exit__(None, None, None)
+    assert exp.metrics == {'x': 1.0}
+
+
+class TestContextManagerGuardAlreadyFailed:
+  def test_guard_skips_when_already_failed(self) -> None:
+    exp = Experiment(experiment_id='cm-guard-f')
+    exp.start()
+    exp.fail('original error')
+    exc = RuntimeError('second error')
+    result = exp.__exit__(type(exc), exc, None)
+    assert result is False
+    assert exp.status == Status.failed
+    assert exp.error == 'original error'
+
+  def test_no_double_fail(self) -> None:
+    exp = Experiment(experiment_id='cm-guard-f2')
+    exp.start()
+    exp.fail('first')
+    exp.__exit__(RuntimeError, RuntimeError('second'), None)
+    assert exp.error == 'first'
+
+
+class TestContextManagerRunningResumeSkipsStart:
+  """Checkpoint resume: status=running before __enter__ is allowed."""
+
+  def test_enter_running_skips_start(self) -> None:
+    exp = Experiment(experiment_id='cm-resume')
+    exp.start()
+    assert exp.status == Status.running
+    started_at = exp.started_at
+    with exp as ctx:
+      assert ctx is exp
+      assert exp.status == Status.running
+      assert exp.started_at == started_at
+    assert exp.status == Status.completed
+
+  def test_enter_completed_raises(self) -> None:
+    exp = Experiment(experiment_id='cm-completed')
+    exp.start()
+    exp.complete()
+    with pytest.raises(ExperimentError, match='cannot enter context'), exp:
+      pass
+
+  def test_enter_failed_raises(self) -> None:
+    exp = Experiment(experiment_id='cm-failed')
+    exp.start()
+    exp.fail('oops')
+    with pytest.raises(ExperimentError, match='cannot enter context'), exp:
+      pass
+
+  def test_enter_cancelled_raises(self) -> None:
+    exp = Experiment(experiment_id='cm-cancelled')
+    exp.cancel()
+    with pytest.raises(ExperimentError, match='cannot enter context'), exp:
+      pass
+
+
+class TestContextManagerReentryRaises:
+  def test_reentry_after_terminal_raises(self) -> None:
+    exp = Experiment(experiment_id='cm-reentry')
+    with exp:
+      pass
+    assert exp.status == Status.completed
+    with pytest.raises(ExperimentError, match='cannot enter context'), exp:
+      pass
+
+  def test_nested_enter_raises(self) -> None:
+    exp = Experiment(experiment_id='cm-nested')
+    with exp, pytest.raises(ExperimentError, match='cannot start'):
+      exp.start()
+
+
+class TestNestedContextManager:
+  """Re-entrant (nested) context manager behavior with depth counter."""
+
+  def test_nested_context_manager_defers_completion(self) -> None:
+    """Inner exit does not finalize; only outer exit completes."""
+    e = Experiment(experiment_id='nested')
+    with e:
+      assert e.status == Status.running
+      with e:
+        assert e.status == Status.running
+      assert e.status == Status.running
+    assert e.status == Status.completed
+
+  def test_nested_context_manager_failure_propagates(self) -> None:
+    """Exception in inner block propagates; outer exit calls fail."""
+    e = Experiment(experiment_id='nested-fail')
+    msg = 'boom'
+    with pytest.raises(ValueError, match=msg), e, e:
+      raise ValueError(msg)
+    assert e.status == Status.failed
+    assert msg in e.error
+
+  def test_triple_nesting(self) -> None:
+    """Three levels of nesting; only outermost exit finalizes."""
+    e = Experiment(experiment_id='triple')
+    with e:
+      with e:
+        with e:
+          assert e.status == Status.running
+        assert e.status == Status.running
+      assert e.status == Status.running
+    assert e.status == Status.completed
+
+  def test_depth_resets_after_exit(self) -> None:
+    """After full exit, depth is 0 and re-entering works from pending."""
+    e = Experiment(experiment_id='depth-reset')
+    with e:
+      pass
+    assert e.status == Status.completed
+    with pytest.raises(ExperimentError, match='cannot enter context'), e:
+      pass
+
+
+class TestExcValNoneEdgeCase:
+  """Edge cases for __exit__ when exc_val is None."""
+
+  def test_exit_with_exc_val_none_uses_type_name(self) -> None:
+    """When exc_val is None but exc_type is set, error uses type name."""
+    e = Experiment(experiment_id='exc-none')
+    e.start()
+    e._context_depth = 1
+    e.__exit__(ValueError, None, None)
+    assert e.status == Status.failed
+    assert e.error == 'ValueError'
+    assert e.error != 'None'
+
+  def test_exit_with_both_exc_type_and_val(self) -> None:
+    """When both exc_type and exc_val are set, error uses str(exc_val)."""
+    e = Experiment(experiment_id='exc-both')
+    e.start()
+    e._context_depth = 1
+    exc = RuntimeError('kaboom')
+    e.__exit__(type(exc), exc, None)
+    assert e.status == Status.failed
+    assert e.error == 'kaboom'
+
+  def test_exit_normal_no_exception(self) -> None:
+    """Normal exit (no exception) completes the experiment."""
+    e = Experiment(experiment_id='exc-normal')
+    e.start()
+    e._context_depth = 1
+    e.__exit__(None, None, None)
+    assert e.status == Status.completed
+
+
+class TestContextDepthNotSerialized:
+  """Transient _context_depth must not appear in state_dict."""
+
+  def test_context_depth_not_in_state_dict(self) -> None:
+    """Transient _context_depth must not appear in state_dict."""
+    e = Experiment(experiment_id='depth-test')
+    with e:
+      state = e.state_dict()
+      assert '_context_depth' not in state
+      assert 'context_depth' not in state
+
+  def test_load_state_dict_ignores_depth(self) -> None:
+    """load_state_dict does not restore _context_depth even if present."""
+    e = Experiment(experiment_id='load-depth')
+    e.start()
+    state = e.state_dict()
+    state['_context_depth'] = 5
+
+    e2 = Experiment(experiment_id='temp')
+    e2.load_state_dict(state)
+    assert e2._context_depth == 0
+
+
+class TestSubclass:
+  def test_custom_experiment_with_extra_fields(self) -> None:
+    class CustomExperiment(Experiment):
+      def __init__(
+        self, experiment_id: str, hypothesis: str | None = None, extra: str | None = None
+      ) -> None:
+        super().__init__(experiment_id=experiment_id, hypothesis=hypothesis)
+        self.extra = extra
+
+      def state_dict(self) -> dict[str, Any]:
+        state = super().state_dict()
+        state['extra'] = self.extra
+        return state
+
+      def load_state_dict(self, state: dict[str, Any]) -> None:
+        super().load_state_dict(state)
+        self.extra = state['extra']
+
+    exp = CustomExperiment(experiment_id='custom', hypothesis='test', extra='value')
+    assert exp.extra == 'value'
+    exp.start()
+    assert exp.status == Status.running
+    state = exp.state_dict()
+    assert state['extra'] == 'value'
+
+    exp2 = CustomExperiment(experiment_id='temp')
+    exp2.load_state_dict(state)
+    assert exp2.extra == 'value'
+    assert exp2.status == Status.running
+
+
+class TestRequireStatusMessagesStable:
+  """Verify _require_status preserves error message format across all guarded methods."""
+
+  @pytest.mark.parametrize(
+    ('setup_status', 'method', 'action', 'expected_status'),
+    [
+      ('running', 'start', 'start', 'pending'),
+      ('pending', 'advance_epoch', 'advance epoch', 'running'),
+      ('completed', 'start', 'start', 'pending'),
+      ('failed', 'complete', 'complete', 'pending or running'),
+      ('completed', 'fail', 'fail', 'pending or running'),
+      ('cancelled', 'fail', 'fail', 'pending or running'),
+      ('completed', 'advance_epoch', 'advance epoch', 'running'),
+    ],
+  )
+  def test_message_format(
+    self,
+    setup_status: str,
+    method: str,
+    action: str,
+    expected_status: str,
+  ) -> None:
+    exp = Experiment(experiment_id='msg-test')
+    if setup_status == 'running':
+      exp.start()
+    elif setup_status == 'completed':
+      exp.start()
+      exp.complete()
+    elif setup_status == 'failed':
+      exp.start()
+      exp.fail()
+    elif setup_status == 'cancelled':
+      exp.cancel()
+
+    with pytest.raises(ExperimentError) as exc_info:
+      getattr(exp, method)()
+
+    error_msg = str(exc_info.value)
+    assert f'cannot {action}:' in error_msg
+    assert "experiment id='msg-test'" in error_msg
+    assert f'expected {expected_status}' in error_msg
+
+
+class TestStrictLoadStateDict:
+  def test_load_state_dict_missing_last_accepted_epoch_raises(self) -> None:
+    """Missing last_accepted_epoch key raises KeyError."""
+    e = Experiment(experiment_id='strict')
+    state = e.state_dict()
+    del state['last_accepted_epoch']
+    with pytest.raises(KeyError, match='last_accepted_epoch'):
+      e.load_state_dict(state)

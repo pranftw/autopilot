@@ -22,7 +22,7 @@ class TestExposeRecord:
 
   def test_timestamp_auto(self):
     r = ExposeRecord(command='noop', description='test')
-    assert r.timestamp != ''
+    assert r.timestamp
 
 
 class TestExposeCollector:
@@ -81,9 +81,14 @@ class TestExposeCommand:
 
   def test_exception_sets_exit_code(self):
     c = ExposeCollector()
+
+    def boom() -> None:
+      msg = 'boom'
+      raise ValueError(msg)
+
     try:
       with expose_command(c, 'failing', 'bad cmd'):
-        raise ValueError('boom')
+        boom()
     except ValueError:
       pass
     records = c.to_list()

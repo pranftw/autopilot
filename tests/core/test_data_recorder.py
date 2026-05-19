@@ -1,26 +1,33 @@
 """Tests for DataRecorderCallback."""
 
 from autopilot.core.callbacks.data_recorder import DataRecorderCallback
-from autopilot.core.types import Datum
+from autopilot.core.types import EvalDatum
 from unittest.mock import MagicMock
+
+
+def _mock_trainer() -> MagicMock:
+  trainer = MagicMock()
+  trainer.experiment = None
+  trainer.tree = None
+  return trainer
 
 
 class TestDataRecorderCallback:
   def test_accumulates_batch_data(self, tmp_path):
     cb = DataRecorderCallback(tmp_path)
-    trainer = MagicMock()
-    cb.on_train_epoch_start(trainer=trainer, epoch=1)
+    trainer = _mock_trainer()
+    cb.on_train_epoch_start(trainer=trainer, module=None, epoch=1)
     for i in range(5):
-      cb.on_train_batch_end(trainer=trainer, batch_idx=i, data=Datum(success=True))
+      cb.on_train_batch_end(trainer=trainer, module=None, batch_idx=i, data=EvalDatum(success=True))
     assert len(cb._batch_data) == 5
 
   def test_writes_data_jsonl(self, tmp_path):
     cb = DataRecorderCallback(tmp_path)
-    trainer = MagicMock()
-    cb.on_train_epoch_start(trainer=trainer, epoch=1)
+    trainer = _mock_trainer()
+    cb.on_train_epoch_start(trainer=trainer, module=None, epoch=1)
     for i in range(3):
-      cb.on_train_batch_end(trainer=trainer, batch_idx=i, data=Datum(success=True))
-    cb.on_train_epoch_end(trainer=trainer, epoch=1)
+      cb.on_train_batch_end(trainer=trainer, module=None, batch_idx=i, data=EvalDatum(success=True))
+    cb.on_train_epoch_end(trainer=trainer, module=None, epoch=1)
     data_file = tmp_path / 'epoch_1' / 'data.jsonl'
     assert data_file.exists()
     lines = data_file.read_text().strip().splitlines()
@@ -28,41 +35,41 @@ class TestDataRecorderCallback:
 
   def test_no_epoch_metrics_produced(self, tmp_path):
     cb = DataRecorderCallback(tmp_path)
-    trainer = MagicMock()
-    cb.on_train_epoch_start(trainer=trainer, epoch=1)
-    cb.on_train_batch_end(trainer=trainer, batch_idx=0, data=Datum(success=True))
-    cb.on_train_epoch_end(trainer=trainer, epoch=1)
+    trainer = _mock_trainer()
+    cb.on_train_epoch_start(trainer=trainer, module=None, epoch=1)
+    cb.on_train_batch_end(trainer=trainer, module=None, batch_idx=0, data=EvalDatum(success=True))
+    cb.on_train_epoch_end(trainer=trainer, module=None, epoch=1)
     assert not (tmp_path / 'epoch_1' / 'epoch_metrics.json').exists()
     assert not (tmp_path / 'epoch_1' / 'delta_metrics.json').exists()
 
   def test_resets_between_epochs(self, tmp_path):
     cb = DataRecorderCallback(tmp_path)
-    trainer = MagicMock()
-    cb.on_train_epoch_start(trainer=trainer, epoch=1)
-    cb.on_train_batch_end(trainer=trainer, data=Datum(success=True))
-    cb.on_train_epoch_end(trainer=trainer, epoch=1)
-    cb.on_train_epoch_start(trainer=trainer, epoch=2)
+    trainer = _mock_trainer()
+    cb.on_train_epoch_start(trainer=trainer, module=None, epoch=1)
+    cb.on_train_batch_end(trainer=trainer, module=None, data=EvalDatum(success=True))
+    cb.on_train_epoch_end(trainer=trainer, module=None, epoch=1)
+    cb.on_train_epoch_start(trainer=trainer, module=None, epoch=2)
     assert cb._batch_data == []
 
   def test_empty_epoch(self, tmp_path):
     cb = DataRecorderCallback(tmp_path)
-    trainer = MagicMock()
-    cb.on_train_epoch_start(trainer=trainer, epoch=1)
-    cb.on_train_epoch_end(trainer=trainer, epoch=1)
+    trainer = _mock_trainer()
+    cb.on_train_epoch_start(trainer=trainer, module=None, epoch=1)
+    cb.on_train_epoch_end(trainer=trainer, module=None, epoch=1)
     data_file = tmp_path / 'epoch_1' / 'data.jsonl'
-    assert not data_file.exists() or data_file.read_text().strip() == ''
+    assert not data_file.exists() or not data_file.read_text().strip()
 
   def test_epoch_dir_created(self, tmp_path):
     cb = DataRecorderCallback(tmp_path)
-    trainer = MagicMock()
-    cb.on_train_epoch_start(trainer=trainer, epoch=3)
-    cb.on_train_batch_end(trainer=trainer, data=Datum(success=True))
-    cb.on_train_epoch_end(trainer=trainer, epoch=3)
+    trainer = _mock_trainer()
+    cb.on_train_epoch_start(trainer=trainer, module=None, epoch=3)
+    cb.on_train_batch_end(trainer=trainer, module=None, data=EvalDatum(success=True))
+    cb.on_train_epoch_end(trainer=trainer, module=None, epoch=3)
     assert (tmp_path / 'epoch_3').is_dir()
 
   def test_serialize_item_datum(self, tmp_path):
     cb = DataRecorderCallback(tmp_path)
-    result = cb.serialize_item(Datum(success=True))
+    result = cb.serialize_item(EvalDatum(success=True))
     assert isinstance(result, dict)
     assert result['success'] is True
 
@@ -81,10 +88,10 @@ class TestDataRecorderCallback:
         return {'custom': True}
 
     cb = Custom(tmp_path)
-    trainer = MagicMock()
-    cb.on_train_epoch_start(trainer=trainer, epoch=1)
-    cb.on_train_batch_end(trainer=trainer, data='anything')
-    cb.on_train_epoch_end(trainer=trainer, epoch=1)
+    trainer = _mock_trainer()
+    cb.on_train_epoch_start(trainer=trainer, module=None, epoch=1)
+    cb.on_train_batch_end(trainer=trainer, module=None, data='anything')
+    cb.on_train_epoch_end(trainer=trainer, module=None, epoch=1)
     data_file = tmp_path / 'epoch_1' / 'data.jsonl'
     assert data_file.exists()
 
@@ -94,9 +101,9 @@ class TestDataRecorderCallback:
         return None
 
     cb = SkipAll(tmp_path)
-    trainer = MagicMock()
-    cb.on_train_epoch_start(trainer=trainer, epoch=1)
-    cb.on_train_batch_end(trainer=trainer, data=Datum(success=True))
+    trainer = _mock_trainer()
+    cb.on_train_epoch_start(trainer=trainer, module=None, epoch=1)
+    cb.on_train_batch_end(trainer=trainer, module=None, data=EvalDatum(success=True))
     assert len(cb._batch_data) == 0
 
   def test_artifact_registration(self, tmp_path):

@@ -1,0 +1,9 @@
+id: no-conditional-import
+language: Python
+severity: error
+message: "No conditional/fallback imports. Do not use try/except around imports (CLAUDE.md)."
+rule:
+  kind: import_statement
+  inside:
+    kind: try_statement
+    stopBy: end

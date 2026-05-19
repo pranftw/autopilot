@@ -2,9 +2,9 @@ from autopilot.ai.parameter import PathParameter
 from autopilot.core.gradient import Gradient
 from autopilot.core.loss import Loss
 from autopilot.core.metric import Metric
-from autopilot.core.types import Datum
-from autopilot.core.module import AutoPilotModule
+from autopilot.core.module.autopilot_module import AutoPilotModule
 from autopilot.core.parameter import Parameter
+from autopilot.core.types import Datum, EvalDatum
 from dataclasses import dataclass, field
 from pathlib import Path
 from textmatch.optimizer import RuleOptimizer
@@ -18,6 +18,7 @@ class RuleGradient(Gradient):
   missing_patterns: list[dict] = field(default_factory=list)
   wrong_category: list[dict] = field(default_factory=list)
   ambiguous: list[dict] = field(default_factory=list)
+  metadata: dict[str, Any] = field(default_factory=dict)
 
   def accumulate(self, other: 'RuleGradient') -> 'RuleGradient':
     combined_metadata = {**self.metadata, **other.metadata}
@@ -50,15 +51,24 @@ class RuleGradient(Gradient):
 
 
 class TextMatchLoss(Loss):
+  """Accumulates classification errors; graph backward distributes gradients.
+
+  forward() tracks per-item errors and delegates to Loss.forward() for
+  _last_data / _accumulated bookkeeping. compute_seed_gradient() produces
+  a RuleGradient seed. backward() is inherited from Loss and drives
+  graph.backward() -- no direct param.grad assignment.
+  """
+
   def __init__(self, parameters: list[Parameter] | None = None):
     super().__init__(parameters)
-    self._errors: list[Datum] = []
+    self._errors: list[EvalDatum] = []
 
-  def forward(self, data: Datum, targets: Any = None) -> None:
+  def forward(self, data: EvalDatum, targets: Any = None) -> None:
+    super().forward(data, targets)
     if not data.success:
       self._errors.append(data)
 
-  def backward(self) -> None:
+  def compute_seed_gradient(self) -> RuleGradient:
     missing = []
     wrong = []
     ambiguous = []
@@ -89,7 +99,7 @@ class TextMatchLoss(Loss):
             'matched_rules': meta.get('matched_rules', []),
           }
         )
-    grad = RuleGradient(
+    rule_grad = RuleGradient(
       missing_patterns=missing,
       wrong_category=wrong,
       ambiguous=ambiguous,
@@ -102,11 +112,10 @@ class TextMatchLoss(Loss):
         },
       },
     )
-    for param in self._loss_parameters:
-      if param.requires_grad:
-        param.grad = grad
+    return rule_grad
 
   def reset(self) -> None:
+    super().reset()
     self._errors = []
 
 
@@ -119,7 +128,7 @@ class AccuracyMetric(Metric):
     self.add_state('_total', 0)
     self.add_state('_per_category', dict)
 
-  def update(self, datum: Datum) -> None:
+  def update(self, datum: EvalDatum) -> None:
     self._total += 1
     expected = datum.metadata.get('expected', '')
     if datum.success:
@@ -154,7 +163,7 @@ class TextMatchModule(AutoPilotModule):
     with open(rules_path) as f:
       return json.load(f)
 
-  def _classify(self, batch: Datum, rules: list[dict]) -> Datum:
+  def _classify(self, batch: EvalDatum, rules: list[dict]) -> EvalDatum:
     text = batch.metadata.get('text', '')
     expected = batch.metadata.get('expected', '')
     matched = []
@@ -163,7 +172,7 @@ class TextMatchModule(AutoPilotModule):
         matched.append((i, rule))
 
     if not matched:
-      return Datum(
+      return EvalDatum(
         success=False,
         metadata={
           'text': text,
@@ -180,7 +189,7 @@ class TextMatchModule(AutoPilotModule):
     predicted = best_rule['category']
 
     if predicted == expected:
-      return Datum(
+      return EvalDatum(
         success=True,
         metadata={
           'text': text,
@@ -189,7 +198,7 @@ class TextMatchModule(AutoPilotModule):
         },
       )
 
-    return Datum(
+    return EvalDatum(
       success=False,
       metadata={
         'text': text,
@@ -200,15 +209,25 @@ class TextMatchModule(AutoPilotModule):
       },
     )
 
-  def forward(self, batch: Datum) -> Datum:
+  def _unwrap_single(self, batch: Any) -> EvalDatum:
+    """Extract the single EvalDatum from a collated Datum(items=[...]) wrapper."""
+    if isinstance(batch, Datum) and batch.items and isinstance(batch.items[0], EvalDatum):
+      return batch.items[0]
+    return batch
+
+  def forward(self, batch: Any) -> EvalDatum:
+    item = self._unwrap_single(batch)
     rules = self._load_rules()
-    return self._classify(batch, rules)
+    return self._classify(item, rules)
 
-  def training_step(self, batch: Any) -> Datum:
-    return self.forward(batch)
+  def training_step(self, batch: Any, batch_idx: int) -> EvalDatum:
+    return self(batch)
 
-  def validation_step(self, batch: Any) -> Datum:
-    return self.forward(batch)
+  def validation_step(self, batch: Any, batch_idx: int) -> EvalDatum:
+    return self(batch)
+
+  def test_step(self, batch: Any, batch_idx: int) -> EvalDatum:
+    return self(batch)
 
   def configure_optimizers(self):
     return RuleOptimizer([self.rules], rules_dir=self._rules_dir)

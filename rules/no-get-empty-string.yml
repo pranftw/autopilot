@@ -1,0 +1,8 @@
+id: no-get-empty-string
+language: Python
+severity: error
+message: "Do not use .get(key, ''). Use d['key'] or .get('key') without default."
+rule:
+  any:
+    - pattern: $OBJ.get($KEY, '')
+    - pattern: $OBJ.get($KEY, "")

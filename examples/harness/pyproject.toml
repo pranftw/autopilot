@@ -1,0 +1,50 @@
+# Agent harness optimization example -- retail customer service via tau-bench.
+# autopilot is path-sourced from the monorepo root so local edits are reflected
+# immediately without a publish cycle.
+[project]
+name = "harness"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "autopilot",
+    "pydantic-ai",
+]
+
+[tool.uv.sources]
+# This path reference requires running from within the autopilot repo.
+autopilot = { path = "../../" }
+
+# tau2 is dev-only: it pulls litellm/fastapi/pandas which are not needed at
+# runtime.  Install with `uv sync --extra dev`.
+[project.optional-dependencies]
+dev = ["tau2", "pytest", "ruff"]
+
+[tool.uv.sources.tau2]
+git = "https://github.com/sierra-research/tau2-bench"
+branch = "main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+indent-width = 2
+
+[tool.ruff.format]
+quote-style = "single"
+indent-style = "space"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "Q"]
+
+[tool.ruff.lint.per-file-ignores]
+"harness/tools/retail_tools.py" = ["F821"]
+
+[tool.ruff.lint.flake8-quotes]
+inline-quotes = "single"
+
+[tool.ruff.lint.isort]
+from-first = true
+no-sections = true
+lines-between-types = 0
+known-first-party = ["autopilot", "harness"]

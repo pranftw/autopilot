@@ -1,50 +1,14 @@
 """Integration tests for Trainer with Loss, Optimizer, metrics, and DataModule."""
 
 from autopilot.core.callbacks.callback import Callback
-from autopilot.core.loss import Loss
 from autopilot.core.metric import Metric
-from autopilot.core.module import AutoPilotModule
-from autopilot.core.optimizer import Optimizer
+from autopilot.core.module.autopilot_module import AutoPilotModule
 from autopilot.core.parameter import Parameter
-from autopilot.core.trainer import Trainer
-from autopilot.core.types import Datum
+from autopilot.core.trainer.trainer import Trainer
+from autopilot.core.types import EvalDatum
 from autopilot.data.dataloader import DataLoader
-from autopilot.data.datamodule import DataModule
-from helpers import NumericGradient
-
-
-class _TrackingLoss(Loss):
-  def __init__(self, params=None):
-    super().__init__(params)
-    self.forward_calls = 0
-    self.backward_calls = 0
-    self.reset_calls = 0
-
-  def forward(self, data, targets=None):
-    self.forward_calls += 1
-
-  def backward(self):
-    self.backward_calls += 1
-    for p in self._loss_parameters:
-      if p.requires_grad:
-        p.grad = NumericGradient(value=1.0)
-
-  def reset(self):
-    self.reset_calls += 1
-
-
-class _TrackingOptimizer(Optimizer):
-  def __init__(self, params, lr=1.0):
-    super().__init__(params, lr)
-    self.step_calls = 0
-    self.zero_grad_calls = 0
-
-  def step(self):
-    self.step_calls += 1
-
-  def zero_grad(self):
-    self.zero_grad_calls += 1
-    super().zero_grad()
+from autopilot.data.datamodule import DataModule, Stage
+from tests.doubles import TrackingNumericLoss, TrackingOptimizer
 
 
 class _CountMetric(Metric):
@@ -63,20 +27,20 @@ class _TrainModule(AutoPilotModule):
   def __init__(self):
     super().__init__()
     self.param = Parameter(requires_grad=True)
-    self.loss = _TrackingLoss([self.param])
+    self.loss = TrackingNumericLoss([self.param])
     self.accuracy = _CountMetric()
-    self._optimizer = _TrackingOptimizer([self.param])
+    self._optimizer = TrackingOptimizer([self.param])
     self._train_steps = 0
     self._val_steps = 0
 
   def forward(self, batch):
     return batch
 
-  def training_step(self, batch):
+  def training_step(self, batch, batch_idx):
     self._train_steps += 1
     return batch
 
-  def validation_step(self, batch):
+  def validation_step(self, batch, batch_idx):
     self._val_steps += 1
     return batch
 
@@ -85,7 +49,7 @@ class _TrainModule(AutoPilotModule):
 
 
 def _batches(n: int) -> DataLoader:
-  return DataLoader([Datum(metadata={'i': i}) for i in range(n)], batch_size=1)
+  return DataLoader([EvalDatum(metadata={'i': i}) for i in range(n)], batch_size=1)
 
 
 class TestFullLoop:
@@ -146,22 +110,22 @@ class _HookRecorder(Callback):
   def __init__(self):
     self.calls: list[str] = []
 
-  def on_fit_start(self, trainer):
+  def on_fit_start(self, trainer, module):
     self.calls.append('on_fit_start')
 
-  def on_fit_end(self, trainer):
+  def on_fit_end(self, trainer, module):
     self.calls.append('on_fit_end')
 
-  def on_train_epoch_start(self, trainer, epoch: int):
+  def on_train_epoch_start(self, trainer, module, epoch: int):
     self.calls.append('on_train_epoch_start')
 
-  def on_train_epoch_end(self, trainer, epoch: int):
+  def on_train_epoch_end(self, trainer, module, epoch: int):
     self.calls.append('on_train_epoch_end')
 
-  def on_train_batch_start(self, trainer, batch_idx: int = 0):
+  def on_train_batch_start(self, trainer, module, batch_idx: int = 0):
     self.calls.append(f'on_train_batch_start:{batch_idx}')
 
-  def on_train_batch_end(self, trainer, batch_idx: int = 0, data=None):
+  def on_train_batch_end(self, trainer, module, batch_idx: int = 0, data=None):
     self.calls.append(f'on_train_batch_end:{batch_idx}')
 
 
@@ -193,8 +157,8 @@ class _RecordingDataModule(DataModule):
   def prepare_data(self) -> None:
     self.prepared = True
 
-  def setup(self, stage: str) -> None:
-    if stage == 'fit':
+  def setup(self, stage: Stage) -> None:
+    if stage == Stage.fit:
       self.setup_fit = True
 
   def train_dataloader(self) -> DataLoader:
@@ -203,8 +167,8 @@ class _RecordingDataModule(DataModule):
   def val_dataloader(self) -> DataLoader:
     return _batches(0)
 
-  def teardown(self, stage: str) -> None:
-    if stage == 'fit':
+  def teardown(self, stage: Stage) -> None:
+    if stage == Stage.fit:
       self.torn = True
 
 

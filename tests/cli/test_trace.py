@@ -1,25 +1,18 @@
 """Tests for trace CLI command."""
 
 from autopilot.cli.commands.trace import TraceCommand
-from autopilot.cli.output import Output
 from autopilot.core.artifacts.epoch import DataArtifact
-from autopilot.core.memory import FileMemory
 from pathlib import Path
+from tests.cli.conftest import make_mock_cli_context
 from unittest.mock import MagicMock
 import json
+import pytest
 
 _data = DataArtifact()
 
 
 def _make_ctx(tmp_path: Path, experiment: str = 'test-exp') -> MagicMock:
-  ctx = MagicMock()
-  ctx.experiment = experiment
-  ctx.epoch = 1
-  ctx.output = Output(use_json=True)
-  exp_dir = tmp_path / experiment
-  exp_dir.mkdir(parents=True, exist_ok=True)
-  ctx.experiment_dir.return_value = exp_dir
-  return ctx
+  return make_mock_cli_context(tmp_path, experiment=experiment, epoch=1)
 
 
 class TestTraceCommand:
@@ -29,13 +22,12 @@ class TestTraceCommand:
 
   def test_collect_no_epoch(self, tmp_path):
     ctx = _make_ctx(tmp_path)
-    ctx.epoch = 0
-    ctx.output = MagicMock()
+    ctx.epoch = None
     cmd = TraceCommand()
-    args = MagicMock(epoch=0, limit=0)
-    cmd.collect(ctx, args)
-    ctx.output.error.assert_called_once()
-    ctx.output.result.assert_not_called()
+    args = MagicMock(epoch=None, limit=0)
+    with pytest.raises(SystemExit) as exc_info:
+      cmd.collect(ctx, args)
+    assert exc_info.value.code == 1
 
   def test_collect_happy_path(self, tmp_path, capsys):
     ctx = _make_ctx(tmp_path)
@@ -66,12 +58,11 @@ class TestTraceCommand:
 
   def test_inspect_no_node(self, tmp_path):
     ctx = _make_ctx(tmp_path)
-    ctx.output = MagicMock()
     cmd = TraceCommand()
-    args = MagicMock(node='', depth=1, epoch=1)
-    cmd.inspect_trace(ctx, args)
-    ctx.output.error.assert_called_once()
-    ctx.output.result.assert_not_called()
+    args = MagicMock(node='', epoch=1)
+    with pytest.raises(SystemExit) as exc_info:
+      cmd.inspect_trace(ctx, args)
+    assert exc_info.value.code == 1
 
   def test_inspect_filters_by_id(self, tmp_path, capsys):
     ctx = _make_ctx(tmp_path)
@@ -80,7 +71,7 @@ class TestTraceCommand:
     _data.append({'id': 'node_b', 'success': False, 'error_message': 'bad'}, exp_dir, epoch=1)
 
     cmd = TraceCommand()
-    args = MagicMock(node='node_b', depth=1, epoch=1)
+    args = MagicMock(node='node_b', epoch=1)
     cmd.inspect_trace(ctx, args)
     captured = capsys.readouterr()
     r = json.loads(captured.out)['result']
@@ -89,29 +80,13 @@ class TestTraceCommand:
     assert r['matches'][0]['success'] is False
     assert r['matches'][0]['error_message'] == 'bad'
 
-  def test_inspect_depth_2_includes_memory(self, tmp_path, capsys):
-    ctx = _make_ctx(tmp_path)
-    exp_dir = tmp_path / 'test-exp'
-    _data.append({'id': 'my_node', 'success': True}, exp_dir, epoch=1)
-
-    memory = FileMemory(exp_dir)
-    memory.learn(epoch=1, outcome='worked', node='my_node', metrics={'accuracy': 0.9})
-
-    cmd = TraceCommand()
-    args = MagicMock(node='my_node', depth=2, epoch=1)
-    cmd.inspect_trace(ctx, args)
-    captured = capsys.readouterr()
-    r = json.loads(captured.out)['result']
-    assert 'memory_records' in r
-    assert len(r['memory_records']) >= 1
-
   def test_inspect_no_matches(self, tmp_path, capsys):
     ctx = _make_ctx(tmp_path)
     exp_dir = tmp_path / 'test-exp'
     _data.append({'id': 'other'}, exp_dir, epoch=1)
 
     cmd = TraceCommand()
-    args = MagicMock(node='nonexistent', depth=1, epoch=1)
+    args = MagicMock(node='nonexistent', epoch=1)
     cmd.inspect_trace(ctx, args)
     captured = capsys.readouterr()
     r = json.loads(captured.out)['result']

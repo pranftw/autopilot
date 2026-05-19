@@ -8,12 +8,11 @@ from autopilot.ai.evaluation.schemas import (
   JudgeInput,
   JudgeResult,
   JudgeVerdict,
-  RetryConfig,
-  RunConfig,
 )
 from autopilot.ai.evaluation.steps import PythonStep
 from autopilot.cli.output import Output
 from pydantic import BaseModel
+from tests.doubles import make_run_config
 from unittest.mock import AsyncMock, patch
 import json
 import pytest
@@ -31,21 +30,9 @@ class StubResultCustom(BaseModel):
   score: float
 
 
-def _make_run_config() -> RunConfig:
-  return RunConfig(
-    model='test-model',
-    num_parallel=1,
-    max_rpm=100,
-    rpm_safety_margin=1.0,
-    retry=RetryConfig(max_retries=1, min_timeout_ms=100, max_timeout_ms=1000, backoff_factor=2),
-    max_tool_steps=5,
-    max_output_tokens=1024,
-  )
-
-
 def _make_config() -> JudgeConfig[StubJudgeConfig]:
   return JudgeConfig(
-    run=_make_run_config(),
+    run=make_run_config(),
     system_prompt='judge test',
     custom=StubJudgeConfig(),
   )
@@ -70,7 +57,7 @@ class StubJudge(JudgeAgent[StubJudgeConfig, StubJudgeCustom, StubResultCustom]):
   def assemble_result(self, item, step_results):
     score = step_results.get('analyze', {}).get('score', 0.0)
     return JudgeResult(
-      id=item.id,
+      id=item.item_id,
       verdict=JudgeVerdict(
         category='correct',
         rationale='looks good',
@@ -158,11 +145,131 @@ class TestResume:
     ckpt_path = tmp_path / 'checkpoint.jsonl'
     cm = CheckpointManager(ckpt_path)
     cm.save_header(config_hash='abc', subsystem='judge', args={})
-    cm.save_event('result', 'J0000', {'result': {'id': 'J0000'}})
-    cm.save_event('result', 'J0001', {'result': {'id': 'J0001'}})
+    cm.save_event(
+      'result',
+      'J0000',
+      {
+        'result': {
+          'id': 'J0000',
+          'verdict': {'category': 'correct', 'rationale': 'ok', 'confidence': 0.9},
+          'custom': {'score': 0.9},
+        },
+      },
+    )
+    cm.save_event(
+      'result',
+      'J0001',
+      {
+        'result': {
+          'id': 'J0001',
+          'verdict': {'category': 'correct', 'rationale': 'ok', 'confidence': 0.9},
+          'custom': {'score': 0.9},
+        },
+      },
+    )
 
     judge = StubJudge()
     items = _make_items(3)
-    await judge.resume(ckpt_path, items, _make_config(), tmp_path, Output())
+    await judge.resume(ckpt_path, items, _make_config(), Output())
 
     assert mock_workflow.await_count == 1
+
+  @pytest.mark.asyncio
+  @patch('autopilot.ai.evaluation.judge.run_step_workflow', new_callable=AsyncMock)
+  async def test_build_summary_includes_prior_and_new_results(
+    self, mock_workflow: AsyncMock, tmp_path
+  ) -> None:
+    mock_workflow.return_value = {'analyze': {'score': 0.9}, 'item': {}}
+    ckpt_path = tmp_path / 'checkpoint.jsonl'
+    cm = CheckpointManager(ckpt_path)
+    cm.save_header(config_hash='abc', subsystem='judge', args={})
+    cm.save_event(
+      'result',
+      'J0000',
+      {
+        'result': {
+          'id': 'J0000',
+          'verdict': {'category': 'correct', 'rationale': 'ok', 'confidence': 0.8},
+          'custom': {'score': 0.8},
+        },
+      },
+    )
+    cm.save_event(
+      'result',
+      'J0001',
+      {
+        'result': {
+          'id': 'J0001',
+          'verdict': {'category': 'correct', 'rationale': 'ok', 'confidence': 0.7},
+          'custom': {'score': 0.7},
+        },
+      },
+    )
+
+    judge = StubJudge()
+    items = _make_items(3)
+    result = await judge.resume(ckpt_path, items, _make_config(), Output())
+
+    assert result['summary']['total'] == 3
+    assert result['summary']['correct'] == 3
+    assert result['resumed_items'] == 3
+
+  @pytest.mark.asyncio
+  @patch('autopilot.ai.evaluation.judge.run_step_workflow', new_callable=AsyncMock)
+  async def test_resume_all_completed_no_new_processing(
+    self, mock_workflow: AsyncMock, tmp_path
+  ) -> None:
+    """When all items are already completed, summary still includes prior results."""
+    ckpt_path = tmp_path / 'checkpoint.jsonl'
+    cm = CheckpointManager(ckpt_path)
+    cm.save_header(config_hash='abc', subsystem='judge', args={})
+    for i in range(3):
+      cm.save_event(
+        'result',
+        f'J{i:04d}',
+        {
+          'result': {
+            'id': f'J{i:04d}',
+            'verdict': {'category': 'correct', 'rationale': 'ok', 'confidence': 0.9},
+            'custom': {'score': 0.9},
+          },
+        },
+      )
+
+    judge = StubJudge()
+    items = _make_items(3)
+    result = await judge.resume(ckpt_path, items, _make_config(), Output())
+
+    assert mock_workflow.await_count == 0
+    assert result['summary']['total'] == 3
+    assert result['summary']['correct'] == 3
+    assert result['summary']['correct'] == result['summary']['total']
+    assert result['resumed_items'] == 3
+
+  @pytest.mark.asyncio
+  @patch('autopilot.ai.evaluation.judge.run_step_workflow', new_callable=AsyncMock)
+  async def test_partial_resume_resumed_items_equals_total_successes(
+    self, mock_workflow: AsyncMock, tmp_path
+  ) -> None:
+    mock_workflow.return_value = {'analyze': {'score': 0.9}, 'item': {}}
+    ckpt_path = tmp_path / 'checkpoint.jsonl'
+    cm = CheckpointManager(ckpt_path)
+    cm.save_header(config_hash='abc', subsystem='judge', args={})
+    cm.save_event(
+      'result',
+      'J0000',
+      {
+        'result': {
+          'id': 'J0000',
+          'verdict': {'category': 'correct', 'rationale': 'ok', 'confidence': 0.5},
+          'custom': {'score': 0.5},
+        },
+      },
+    )
+    judge = StubJudge()
+    items = _make_items(4)
+    result = await judge.resume(ckpt_path, items, _make_config(), Output())
+    assert mock_workflow.await_count == 3
+    assert result['resumed_items'] == 4
+    assert result['summary']['total'] == 4
+    assert result['summary']['correct'] == 4

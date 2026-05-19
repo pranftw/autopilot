@@ -1,0 +1,18 @@
+id: no-param-grad-assign
+language: Python
+severity: error
+message: "Do not assign param.grad directly outside core/operator.py (except = None in zero_grad)."
+ignores:
+  - "tests/**"
+rule:
+  all:
+    - pattern: $PARAM.grad = $VALUE
+    - not:
+        pattern: $PARAM.grad = None
+    - not:
+        inside:
+          kind: class_definition
+          has:
+            field: name
+            regex: "^AccumulateGrad$"
+          stopBy: end

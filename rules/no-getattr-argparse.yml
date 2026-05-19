@@ -1,0 +1,6 @@
+id: no-getattr-on-args
+language: Python
+severity: error
+message: Do not use getattr(args, ..., default) on declared argparse arguments. Access args.x directly.
+rule:
+  pattern: getattr(args, $ATTR, $DEFAULT)

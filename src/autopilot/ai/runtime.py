@@ -1,13 +1,16 @@
 """Rate limiting and parallel execution for AI workflows."""
 
 from collections import deque
-from typing import Awaitable, Callable, TypeVar
+from collections.abc import Awaitable, Callable
+from typing import TypeVar, cast
 import asyncio
 import threading
 import time
 
 T = TypeVar('T')
 R = TypeVar('R')
+
+RPM_WINDOW_SECONDS = 60.0
 
 
 class RateLimiter:
@@ -35,6 +38,12 @@ class SlidingWindowLimiter(RateLimiter):
   """
 
   def __init__(self, max_rpm: int, safety_margin: float = 1.0) -> None:
+    """Configure the effective requests-per-minute ceiling.
+
+    Args:
+      max_rpm: Baseline RPM before applying ``safety_margin``.
+      safety_margin: Multiplier applied to ``max_rpm`` for the enforced cap.
+    """
     self._effective_rpm = int(max_rpm * safety_margin)
     self._window: deque[float] = deque()
     self._sync_lock = threading.Lock()
@@ -44,14 +53,14 @@ class SlidingWindowLimiter(RateLimiter):
     """Sync acquire: blocks with time.sleep() under threading.Lock."""
     with self._sync_lock:
       now = time.monotonic()
-      while self._window and self._window[0] <= now - 60.0:
+      while self._window and self._window[0] <= now - RPM_WINDOW_SECONDS:
         self._window.popleft()
       if len(self._window) >= self._effective_rpm:
-        sleep_time = 60.0 - (now - self._window[0])
+        sleep_time = RPM_WINDOW_SECONDS - (now - self._window[0])
         if sleep_time > 0:
           time.sleep(sleep_time)
           now = time.monotonic()
-          while self._window and self._window[0] <= now - 60.0:
+          while self._window and self._window[0] <= now - RPM_WINDOW_SECONDS:
             self._window.popleft()
       self._window.append(time.monotonic())
 
@@ -59,14 +68,14 @@ class SlidingWindowLimiter(RateLimiter):
     """Async acquire: awaits with asyncio.sleep() under asyncio.Lock."""
     async with self._async_lock:
       now = time.monotonic()
-      while self._window and self._window[0] <= now - 60.0:
+      while self._window and self._window[0] <= now - RPM_WINDOW_SECONDS:
         self._window.popleft()
       if len(self._window) >= self._effective_rpm:
-        sleep_time = 60.0 - (now - self._window[0])
+        sleep_time = RPM_WINDOW_SECONDS - (now - self._window[0])
         if sleep_time > 0:
           await asyncio.sleep(sleep_time)
           now = time.monotonic()
-          while self._window and self._window[0] <= now - 60.0:
+          while self._window and self._window[0] <= now - RPM_WINDOW_SECONDS:
             self._window.popleft()
       self._window.append(time.monotonic())
 
@@ -80,6 +89,12 @@ class ParallelRunner:
   """
 
   def __init__(self, num_parallel: int, limiter: RateLimiter | None = None) -> None:
+    """Create a runner with a max concurrency and optional rate limiter.
+
+    Args:
+      num_parallel: Maximum simultaneously scheduled async tasks.
+      limiter: Optional limiter whose :meth:`~RateLimiter.async_acquire` is awaited.
+    """
     self._num_parallel = num_parallel
     self._limiter = limiter
 
@@ -89,25 +104,30 @@ class ParallelRunner:
     fn: Callable[[T], Awaitable[R]],
     on_complete: Callable[[R], None] | None = None,
   ) -> list[R]:
-    """Process all items with concurrency and optional RPM limits."""
+    """Process all items with concurrency and optional RPM limits.
+
+    Returns results in the same order as the input items, regardless of
+    completion order.
+
+    Returns:
+      List of ``fn`` results aligned with the ``items`` argument order.
+    """
     if not items:
       return []
 
     semaphore = asyncio.Semaphore(self._num_parallel)
-    results: list[R] = []
-    lock = asyncio.Lock()
+    ordered: list[R | None] = [None] * len(items)
 
-    async def _process(item: T) -> R:
+    async def _process(index: int, item: T) -> R:
       async with semaphore:
         if self._limiter is not None:
           await self._limiter.async_acquire()
         result = await fn(item)
-        async with lock:
-          results.append(result)
+        ordered[index] = result
         if on_complete is not None:
           on_complete(result)
         return result
 
-    tasks = [asyncio.create_task(_process(item)) for item in items]
+    tasks = [asyncio.create_task(_process(i, item)) for i, item in enumerate(items)]
     await asyncio.gather(*tasks)
-    return results
+    return cast(list[R], ordered)

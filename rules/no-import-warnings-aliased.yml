@@ -1,0 +1,6 @@
+id: no-import-warnings-aliased
+language: Python
+severity: error
+message: Do not import the warnings module (even aliased). Raise specific exceptions instead. See CLAUDE.md Prohibited patterns.
+rule:
+  pattern: import warnings as $ALIAS

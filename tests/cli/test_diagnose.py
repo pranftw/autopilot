@@ -1,25 +1,19 @@
 """Tests for diagnose CLI command."""
 
 from autopilot.cli.commands.diagnose import DiagnoseCommand
-from autopilot.cli.output import Output
 from autopilot.core.artifacts.artifact import JSONArtifact, JSONLArtifact
 from pathlib import Path
+from tests.cli.conftest import make_mock_cli_context
 from unittest.mock import MagicMock
 import json
+import pytest
 
 _diagnoses = JSONLArtifact('trace_diagnoses.jsonl', scope='epoch')
 _heatmap = JSONArtifact('node_heatmap.json', scope='epoch')
 
 
 def _make_ctx(tmp_path: Path, experiment: str = 'test-exp') -> MagicMock:
-  ctx = MagicMock()
-  ctx.experiment = experiment
-  ctx.epoch = 1
-  ctx.output = Output(use_json=True)
-  exp_dir = tmp_path / experiment
-  exp_dir.mkdir(parents=True, exist_ok=True)
-  ctx.experiment_dir.return_value = exp_dir
-  return ctx
+  return make_mock_cli_context(tmp_path, experiment=experiment, epoch=1)
 
 
 class TestDiagnoseCommand:
@@ -29,13 +23,12 @@ class TestDiagnoseCommand:
 
   def test_run_no_epoch(self, tmp_path):
     ctx = _make_ctx(tmp_path)
-    ctx.epoch = 0
-    ctx.output = MagicMock()
+    ctx.epoch = None
     cmd = DiagnoseCommand()
-    args = MagicMock(epoch=0, category='', node='')
-    cmd.run_diagnose(ctx, args)
-    ctx.output.error.assert_called_once()
-    ctx.output.result.assert_not_called()
+    args = MagicMock(epoch=None, category='', node='')
+    with pytest.raises(SystemExit) as exc_info:
+      cmd.run_diagnose(ctx, args)
+    assert exc_info.value.code == 1
 
   def test_run_empty_traces(self, tmp_path, capsys):
     ctx = _make_ctx(tmp_path)
@@ -79,13 +72,12 @@ class TestDiagnoseCommand:
 
   def test_heatmap_no_epoch(self, tmp_path):
     ctx = _make_ctx(tmp_path)
-    ctx.epoch = 0
-    ctx.output = MagicMock()
+    ctx.epoch = None
     cmd = DiagnoseCommand()
-    args = MagicMock(epoch=0)
-    cmd.heatmap(ctx, args)
-    ctx.output.error.assert_called_once()
-    ctx.output.result.assert_not_called()
+    args = MagicMock(epoch=None)
+    with pytest.raises(SystemExit) as exc_info:
+      cmd.heatmap(ctx, args)
+    assert exc_info.value.code == 1
 
   def test_heatmap_happy_path(self, tmp_path, capsys):
     ctx = _make_ctx(tmp_path)
@@ -98,3 +90,11 @@ class TestDiagnoseCommand:
     captured = capsys.readouterr()
     envelope = json.loads(captured.out)
     assert envelope['result']['heatmap'] == {'node_a': 5, 'node_b': 2}
+
+  def test_heatmap_no_artifact(self, tmp_path):
+    ctx = _make_ctx(tmp_path)
+    cmd = DiagnoseCommand()
+    args = MagicMock(epoch=99)
+    with pytest.raises(SystemExit) as exc_info:
+      cmd.heatmap(ctx, args)
+    assert exc_info.value.code == 1

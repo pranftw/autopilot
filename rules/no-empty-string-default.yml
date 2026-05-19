@@ -1,0 +1,13 @@
+id: no-empty-string-default
+language: Python
+severity: error
+message: "Do not use str = '' defaults. Use str | None = None instead."
+rule:
+  kind: typed_default_parameter
+  all:
+    - has:
+        field: type
+        regex: "^str$"
+    - has:
+        field: value
+        regex: "^['\"]['\"]$"

@@ -1,0 +1,16 @@
+id: no-trainer-private-store
+language: Python
+severity: error
+message: "Do not use trainer._store. Use the public trainer.store property instead."
+ignores:
+  - "tests/**"
+rule:
+  all:
+    - pattern: $TRAINER._store
+    - not:
+        inside:
+          kind: class_definition
+          has:
+            field: name
+            regex: "^(Trainer|Experiment|AutoPilotExperiment|IsolatedEnvironment|MergeAgent|StoreTransaction)$"
+          stopBy: end

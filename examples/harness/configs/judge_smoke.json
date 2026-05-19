@@ -1,0 +1,22 @@
+{
+  "run": {
+    "model": "openrouter:google/gemma-4-31b-it",
+    "num_parallel": 8,
+    "max_rpm": 60,
+    "rpm_safety_margin": 0.9,
+    "retry": {
+      "max_retries": 3,
+      "min_timeout_ms": 1000,
+      "max_timeout_ms": 60000,
+      "backoff_factor": 2
+    },
+    "max_tool_steps": 8,
+    "max_output_tokens": 1024
+  },
+  "system_prompt": null,
+  "custom": {
+    "scenario_input": "harness/scenarios/smoke.jsonl",
+    "tier": "smoke",
+    "rubric_dimensions": ["accuracy", "tone", "policy_compliance"]
+  }
+}

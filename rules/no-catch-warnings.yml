@@ -1,0 +1,6 @@
+id: no-catch-warnings
+language: Python
+severity: error
+message: Do not use warnings.catch_warnings(). The framework does not emit warnings.
+rule:
+  pattern: warnings.catch_warnings($$$ARGS)

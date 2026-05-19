@@ -19,7 +19,7 @@ A QA assistant answers factual questions using a system prompt. The optimization
 3. **Backward**: structure failures into a text gradient on the `PathParameter`
 4. **Optimizer step**: optimizer agent (file tools) reads the gradient and edits `system.txt`
 
-Two `ClaudeCodeAgent` instances:
+Two `ClaudeCodeAgent` instances (both use `model='haiku'` for cost efficiency):
 - **Inference** (`allowed_tools=[]`): pure reasoning, no file access. Answers questions.
 - **Optimizer** (`allowed_tools=['Edit', 'Write', 'Read']`): reads gradient feedback, edits the prompt file.
 
@@ -28,7 +28,7 @@ Two `ClaudeCodeAgent` instances:
 | File | What it does |
 | --- | --- |
 | `protim/module.py` | `PromptModule`, `PromptLoss`, `QAAccuracyMetric` |
-| `protim/trainer.py` | `AccuracyPolicy`, `build_trainer()` -- `FileStore` on `Experiment`, `Trainer(..., experiment=..., policy=...)` |
+| `protim/trainer.py` | `AccuracyPolicy`, `build_trainer()` -- `FileStore` + `AutoPilotExperiment`, `Trainer(..., experiment=..., store=..., policy=...)` |
 | `protim/data.py` | `QADataset`, `QADataModule` |
 | `run.py` | Manual loop: forward -> loss -> backward -> agent step |
 | `run_trainer.py` | Lightning-style `Trainer.fit()` |
@@ -51,4 +51,59 @@ uv sync
 uv run python run.py
 ```
 
-The script copies `prompts/` to `_work/prompts/` so the original seed prompt is preserved. Each epoch prints accuracy and the updated prompt.
+Each epoch prints accuracy and the updated prompt. The prompt is edited in place at `prompts/system.txt`.
+
+## Agent usage
+
+### Mutating commands require `--context`
+
+All mutating autopilot commands require `--context '<reason>'`. Read-only commands
+(`query`, `debug`, `tree list`) are exempt. The context flows to the experiment's
+decision journal and the execution log.
+
+### Parameterized scripts
+
+```bash
+uv run python run.py
+uv run python run_trainer.py --max-epochs 3
+```
+
+### Inline execution with autopilot execute
+
+```bash
+autopilot execute -c "
+from protim.module import PromptModule
+m = PromptModule('prompts')
+print(len(list(m.parameters())))
+" --context 'inspect prompt module parameters'
+```
+
+### File mode
+
+```bash
+autopilot execute run.py --context 'run manual optimization loop'
+autopilot execute run_trainer.py --max-epochs 2 --context 'quick 2-epoch trainer test'
+```
+
+### Module mode
+
+```bash
+autopilot execute -m protim.module --context 'validate module import'
+```
+
+### Stdin pipe (avoids escaping)
+
+```bash
+echo 'from protim.module import PromptModule
+m = PromptModule("prompts")
+for name, p in m.named_parameters():
+    print(name)' | autopilot execute --context 'list prompt parameter names'
+```
+
+### Escaping tips
+
+- For `-c` mode, prefer single-quoted code for `$`, `{}`, or f-strings: `autopilot execute -c 'print(f"x={42}")'`
+- Use stdin pipe for complex multi-line code -- avoids all escaping issues
+- Do NOT use `--` between code and extra args
+- Autopilot global flags (`--experiment`, `--json`) are consumed by autopilot, not forwarded
+- Global flags go before the `execute` subcommand's own arguments

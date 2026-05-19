@@ -2,7 +2,7 @@
 
 from autopilot.core.artifacts.experiment import CommandsArtifact
 from autopilot.core.models import CommandRecord
-from datetime import datetime, timezone
+from autopilot.tracking.io import utc_now_iso
 from pathlib import Path
 import re
 
@@ -17,6 +17,15 @@ DEFAULT_REDACT_PATTERNS: list[str] = [
 
 
 def redact_args(args: list[str], patterns: list[str]) -> list[str]:
+  """Redact argv tokens matching any case-insensitive substring pattern.
+
+  Args:
+    args: Original argv fragments.
+    patterns: Substrings that trigger redaction.
+
+  Returns:
+    New list with sensitive tokens replaced by ``[REDACTED]``.
+  """
   if not patterns:
     return list(args)
   result: list[str] = []
@@ -35,15 +44,30 @@ def create_command_record(
   args: list[str],
   redact_patterns: list[str] | None = None,
 ) -> CommandRecord:
+  """Create a command audit row with optional redaction patterns.
+
+  Args:
+    command: Logical command name.
+    args: Argument list as invoked.
+    redact_patterns: Optional override patterns (defaults to built-in secrets list).
+
+  Returns:
+    ``CommandRecord`` with timestamps and redacted argv mirror.
+  """
   patterns = list(DEFAULT_REDACT_PATTERNS) if redact_patterns is None else list(redact_patterns)
-  ts = datetime.now(timezone.utc).isoformat()
   return CommandRecord(
-    timestamp=ts,
+    timestamp=utc_now_iso(),
     command=command,
     args=list(args),
     redacted_args=redact_args(args, patterns),
   )
 
 
-def log_command(experiment_dir: Path, record: CommandRecord) -> None:
-  CommandsArtifact().append_record(record.to_dict(), experiment_dir)
+def log_command(path: Path, record: CommandRecord) -> None:
+  """Append ``record`` to the commands artifact for an experiment path.
+
+  Args:
+    path: Experiment directory receiving command history.
+    record: Row to append.
+  """
+  CommandsArtifact().append_record(record.to_dict(), path)

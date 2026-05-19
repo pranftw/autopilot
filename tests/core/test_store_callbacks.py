@@ -1,61 +1,73 @@
-"""Tests for store-related Trainer callbacks."""
+"""Tests for store-related Trainer callbacks.
 
-from autopilot.core.callbacks.store import StoreCheckpointCallback, StorePromoterCallback
-from autopilot.core.store import SnapshotManifest
+Proves StoreCheckpointCallback uses the epoch parameter from on_epoch_end(),
+not experiment.epoch. No advance_epoch() calls needed -- the callback is
+decoupled from experiment epoch tracking.
+"""
+
+from autopilot.core.callbacks.store import StoreCheckpointCallback
+from autopilot.core.experiment import Experiment
+from autopilot.core.snapshot import SnapshotManifest
+from typing import Any
 from unittest.mock import MagicMock
+import pytest
 
 
 class RecordingStore:
-  """Minimal stand-in for Store snapshot/promote hooks."""
+  """Minimal stand-in for Store snapshot hooks."""
 
   def __init__(self) -> None:
     self.snapshot_epochs: list[int] = []
-    self.promote_epochs: list[int] = []
+    self.snapshot_ids: list[str] = []
 
-  def snapshot(self, epoch: int) -> SnapshotManifest:
+  def snapshot(
+    self,
+    experiment_id: str,
+    epoch: int,
+    experiment: Any = None,
+    **kwargs: Any,
+  ) -> SnapshotManifest:
+    self.snapshot_ids.append(experiment_id)
     self.snapshot_epochs.append(epoch)
     return SnapshotManifest(epoch=epoch, timestamp='', entries={})
 
-  def promote(self, epoch: int) -> None:
-    self.promote_epochs.append(epoch)
 
-
-def _trainer_with_store(store: RecordingStore) -> MagicMock:
+def _trainer_with_experiment(store: RecordingStore, exp_id: str = 'exp-001') -> MagicMock:
+  exp = Experiment(experiment_id=exp_id)
+  exp.start()
   trainer = MagicMock()
-  trainer.experiment.store = store
+  trainer.experiment = exp
+  trainer.store = store
   return trainer
 
 
 class TestStoreCheckpointCallback:
   def test_snapshot_per_epoch(self) -> None:
+    """Callback uses epoch param, not experiment.epoch -- no advance_epoch() needed."""
     store = RecordingStore()
     cb = StoreCheckpointCallback()
-    trainer = _trainer_with_store(store)
-    for epoch in (1, 2, 3):
-      cb.on_epoch_end(trainer=trainer, epoch=epoch, result={'epoch': epoch})
-    assert store.snapshot_epochs == [1, 2, 3]
+    trainer = _trainer_with_experiment(store)
+    for e in (0, 1, 2):
+      cb.on_epoch_end(trainer=trainer, module=None, epoch=e)
+    assert store.snapshot_epochs == [0, 1, 2]
+    assert store.snapshot_ids == ['exp-001', 'exp-001', 'exp-001']
 
-  def test_epoch_from_result_dict(self) -> None:
+  def test_epoch_param_used_not_experiment_epoch(self) -> None:
+    """Proves the epoch param is used, not experiment.epoch (which stays 0)."""
     store = RecordingStore()
     cb = StoreCheckpointCallback()
-    trainer = _trainer_with_store(store)
-    cb.on_epoch_end(trainer=trainer, epoch=1, result={'epoch': 42})
-    assert store.snapshot_epochs == [42]
-
-  def test_missing_epoch_in_result_uses_hook_epoch(self) -> None:
-    store = RecordingStore()
-    cb = StoreCheckpointCallback()
-    trainer = _trainer_with_store(store)
-    cb.on_epoch_end(trainer=trainer, epoch=7, result={})
-    cb.on_epoch_end(trainer=trainer, epoch=8, result=None)
-    assert store.snapshot_epochs == [7, 8]
+    trainer = _trainer_with_experiment(store)
+    assert trainer.experiment.epoch == -1
+    cb.on_epoch_end(trainer=trainer, module=None, epoch=5)
+    assert store.snapshot_epochs == [5]
+    assert trainer.experiment.epoch == -1
 
   def test_state_dict_returns_last_epoch(self) -> None:
     store = RecordingStore()
     cb = StoreCheckpointCallback()
-    trainer = _trainer_with_store(store)
-    cb.on_epoch_end(trainer=trainer, epoch=1, result=None)
-    assert cb.state_dict() == {'last_epoch': 1}
+    trainer = _trainer_with_experiment(store)
+    cb.on_epoch_end(trainer=trainer, module=None, epoch=0)
+    assert cb.state_dict()['last_epoch'] == 0
 
   def test_load_state_dict_restores_last_epoch(self) -> None:
     cb = StoreCheckpointCallback()
@@ -66,50 +78,26 @@ class TestStoreCheckpointCallback:
     cb = StoreCheckpointCallback()
     assert cb.state_dict() == {'last_epoch': None}
 
-
-class TestStorePromoterCallback:
-  def test_promotes_when_true(self) -> None:
-    store = RecordingStore()
-    cb = StorePromoterCallback(lambda e, r: True)
-    trainer = _trainer_with_store(store)
-    cb.on_epoch_end(trainer=trainer, epoch=2, result=None)
-    assert store.promote_epochs == [2]
-
-  def test_no_promote_when_false(self) -> None:
-    store = RecordingStore()
-    cb = StorePromoterCallback(lambda e, r: False)
-    trainer = _trainer_with_store(store)
-    cb.on_epoch_end(trainer=trainer, epoch=2, result=None)
-    assert store.promote_epochs == []
-
-  def test_predicate_receives_epoch_and_result(self) -> None:
-    store = RecordingStore()
-    seen: list[tuple[int, object]] = []
-
-    def promote_on(e: int, r: object) -> bool:
-      seen.append((e, r))
-      return False
-
-    cb = StorePromoterCallback(promote_on)
-    trainer = _trainer_with_store(store)
-    payload = {'epoch': 5, 'loss': 0.1}
-    cb.on_epoch_end(trainer=trainer, epoch=1, result=payload)
-    assert seen == [(5, payload)]
-
-  def test_multiple_epochs_sequential(self) -> None:
+  def test_no_experiment_is_noop(self) -> None:
     store = RecordingStore()
     cb = StoreCheckpointCallback()
-    trainer = _trainer_with_store(store)
-    for n in range(1, 5):
-      cb.on_epoch_end(trainer=trainer, epoch=n, result=None)
-    assert store.snapshot_epochs == [1, 2, 3, 4]
+    trainer = MagicMock()
+    trainer.experiment = None
+    cb.on_epoch_end(trainer=trainer, module=None, epoch=0)
+    assert store.snapshot_epochs == []
 
+  def test_no_store_is_noop(self) -> None:
+    """When trainer.store is None, callback skips silently."""
+    cb = StoreCheckpointCallback()
+    trainer = MagicMock()
+    trainer.experiment = Experiment(experiment_id='exp-001')
+    trainer.experiment.start()
+    trainer.store = None
+    cb.on_epoch_end(trainer=trainer, module=None, epoch=0)
+    assert cb._last_epoch is None
 
-class TestStorePromoterEvenEpochs:
-  def test_promote_only_on_predicate_epochs(self) -> None:
-    store = RecordingStore()
-    cb = StorePromoterCallback(lambda e, _: e % 2 == 0)
-    trainer = _trainer_with_store(store)
-    for n in (1, 2, 3, 4):
-      cb.on_epoch_end(trainer=trainer, epoch=n, result=None)
-    assert store.promote_epochs == [2, 4]
+  def test_load_state_dict_missing_last_epoch_raises(self) -> None:
+    """Missing last_epoch key raises KeyError."""
+    cb = StoreCheckpointCallback()
+    with pytest.raises(KeyError, match='last_epoch'):
+      cb.load_state_dict({})

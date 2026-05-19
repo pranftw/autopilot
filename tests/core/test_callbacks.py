@@ -1,38 +1,48 @@
 """Tests for Callback base class and Lightning-style hooks."""
 
 from autopilot.core.callbacks.callback import Callback
-from autopilot.core.module import Module
-from autopilot.core.trainer import Trainer
-from autopilot.core.types import Datum
+from autopilot.core.trainer.trainer import Trainer
+from autopilot.data.datamodule import Stage
+from tests.doubles import NoopEvalModule
 from typing import Any
-
-
-class _StubModule(Module):
-  def forward(self, *args, **kwargs) -> Datum:
-    return Datum(success=True)
 
 
 class TestCallbackDefaults:
   def test_all_hooks_are_noop(self) -> None:
     cb = Callback()
-    cb.on_fit_start(trainer=None)
-    cb.on_fit_end(trainer=None)
-    cb.on_train_epoch_start(trainer=None, epoch=1)
-    cb.on_train_epoch_end(trainer=None, epoch=1)
-    cb.on_validation_epoch_start(trainer=None, epoch=1)
-    cb.on_validation_epoch_end(trainer=None, epoch=1)
-    cb.on_test_epoch_start(trainer=None, epoch=1)
-    cb.on_test_epoch_end(trainer=None, epoch=1)
-    cb.on_epoch_start(trainer=None, epoch=1)
-    cb.on_epoch_end(trainer=None, epoch=1)
-    cb.on_loop_start(trainer=None, max_epochs=1)
-    cb.on_loop_end(trainer=None, result={})
-    cb.on_train_batch_start(trainer=None, batch_idx=0)
-    cb.on_train_batch_end(trainer=None, batch_idx=0, data=None)
-    cb.on_before_backward(trainer=None)
-    cb.on_after_backward(trainer=None)
-    cb.on_before_optimizer_step(trainer=None)
-    cb.on_before_zero_grad(trainer=None)
+    cb.setup(trainer=None, module=None, stage=Stage.fit)
+    cb.teardown(trainer=None, module=None, stage=Stage.fit)
+    cb.on_exception(trainer=None, module=None, exception=RuntimeError('test'))
+    cb.on_save_checkpoint(trainer=None, module=None, checkpoint={})
+    cb.on_load_checkpoint(trainer=None, module=None, checkpoint={})
+    cb.on_sanity_check_start(trainer=None, module=None)
+    cb.on_sanity_check_end(trainer=None, module=None)
+    cb.on_validation_batch_start(trainer=None, module=None, batch=None, batch_idx=0)
+    cb.on_validation_batch_end(trainer=None, module=None, batch=None, batch_idx=0)
+    cb.on_test_batch_start(trainer=None, module=None, batch=None, batch_idx=0)
+    cb.on_test_batch_end(trainer=None, module=None, batch=None, batch_idx=0)
+    cb.on_predict_start(trainer=None, module=None)
+    cb.on_predict_end(trainer=None, module=None)
+    cb.on_predict_batch_start(trainer=None, module=None, batch=None, batch_idx=0)
+    cb.on_predict_batch_end(trainer=None, module=None, batch=None, batch_idx=0)
+    cb.on_fit_start(trainer=None, module=None)
+    cb.on_fit_end(trainer=None, module=None)
+    cb.on_train_epoch_start(trainer=None, module=None, epoch=0)
+    cb.on_train_epoch_end(trainer=None, module=None, epoch=0)
+    cb.on_validation_epoch_start(trainer=None, module=None, epoch=0)
+    cb.on_validation_epoch_end(trainer=None, module=None, epoch=0)
+    cb.on_test_epoch_start(trainer=None, module=None, epoch=0)
+    cb.on_test_epoch_end(trainer=None, module=None, epoch=0)
+    cb.on_epoch_start(trainer=None, module=None, epoch=0)
+    cb.on_epoch_end(trainer=None, module=None, epoch=0)
+    cb.on_loop_start(trainer=None, module=None, max_epochs=1)
+    cb.on_loop_end(trainer=None, module=None, result={})
+    cb.on_train_batch_start(trainer=None, module=None, batch_idx=0)
+    cb.on_train_batch_end(trainer=None, module=None, batch_idx=0, data=None)
+    cb.on_before_backward(trainer=None, module=None, loss_fn=None)
+    cb.on_after_backward(trainer=None, module=None)
+    cb.on_before_optimizer_step(trainer=None, module=None)
+    cb.on_before_zero_grad(trainer=None, module=None)
 
   def test_no_status_transition_hook(self) -> None:
     cb = Callback()
@@ -62,13 +72,13 @@ class TestCallbackDispatchInTrainer:
     events: list[str] = []
 
     class Track(Callback):
-      def on_fit_start(self, trainer: Any) -> None:
+      def on_fit_start(self, trainer: Any, module: Any) -> None:
         events.append('fit_start')
 
-      def on_fit_end(self, trainer: Any) -> None:
+      def on_fit_end(self, trainer: Any, module: Any) -> None:
         events.append('fit_end')
 
-    mod = _StubModule()
+    mod = NoopEvalModule()
     trainer = Trainer(callbacks=[Track()], dry_run=True)
     trainer.fit(mod, max_epochs=1)
     assert events == ['fit_start', 'fit_end']
@@ -77,13 +87,13 @@ class TestCallbackDispatchInTrainer:
     events: list[str] = []
 
     class Track(Callback):
-      def on_loop_start(self, trainer: Any, max_epochs: int) -> None:
+      def on_loop_start(self, trainer: Any, module: Any, max_epochs: int) -> None:
         events.append('loop_start')
 
-      def on_loop_end(self, trainer: Any, result: dict) -> None:
+      def on_loop_end(self, trainer: Any, module: Any, result: dict) -> None:
         events.append('loop_end')
 
-    mod = _StubModule()
+    mod = NoopEvalModule()
     trainer = Trainer(callbacks=[Track()], dry_run=True)
     trainer.fit(mod, max_epochs=1)
     assert events == ['loop_start', 'loop_end']
@@ -92,63 +102,71 @@ class TestCallbackDispatchInTrainer:
     epochs: list[tuple] = []
 
     class Track(Callback):
-      def on_epoch_start(self, trainer: Any, epoch: int) -> None:
+      def on_epoch_start(self, trainer: Any, module: Any, epoch: int) -> None:
         epochs.append(('start', epoch))
 
-      def on_epoch_end(self, trainer: Any, epoch: int, result: Any = None) -> None:
+      def on_epoch_end(self, trainer: Any, module: Any, epoch: int, result: Any = None) -> None:
         epochs.append(('end', epoch))
 
-    mod = _StubModule()
+    mod = NoopEvalModule()
     trainer = Trainer(callbacks=[Track()], dry_run=True)
     trainer.fit(mod, max_epochs=2)
-    assert epochs == [('start', 1), ('end', 1), ('start', 2), ('end', 2)]
+    assert epochs == [('start', 0), ('end', 0), ('start', 1), ('end', 1)]
 
   def test_fit_order(self) -> None:
     events: list[str] = []
 
     class Track(Callback):
-      def on_fit_start(self, trainer: Any) -> None:
+      def setup(self, trainer: Any, module: Any, stage: Stage) -> None:
+        events.append('setup')
+
+      def on_fit_start(self, trainer: Any, module: Any) -> None:
         events.append('fit_start')
 
-      def on_loop_start(self, trainer: Any, max_epochs: int) -> None:
+      def on_loop_start(self, trainer: Any, module: Any, max_epochs: int) -> None:
         events.append('loop_start')
 
-      def on_epoch_start(self, trainer: Any, epoch: int) -> None:
+      def on_epoch_start(self, trainer: Any, module: Any, epoch: int) -> None:
         events.append(f'epoch_start_{epoch}')
 
-      def on_epoch_end(self, trainer: Any, epoch: int, result: Any = None) -> None:
+      def on_epoch_end(self, trainer: Any, module: Any, epoch: int, result: Any = None) -> None:
         events.append(f'epoch_end_{epoch}')
 
-      def on_loop_end(self, trainer: Any, result: dict) -> None:
+      def on_loop_end(self, trainer: Any, module: Any, result: dict) -> None:
         events.append('loop_end')
 
-      def on_fit_end(self, trainer: Any) -> None:
+      def on_fit_end(self, trainer: Any, module: Any) -> None:
         events.append('fit_end')
 
-    mod = _StubModule()
+      def teardown(self, trainer: Any, module: Any, stage: Stage) -> None:
+        events.append('teardown')
+
+    mod = NoopEvalModule()
     trainer = Trainer(callbacks=[Track()], dry_run=True)
     trainer.fit(mod, max_epochs=1)
     assert events == [
+      'setup',
       'fit_start',
       'loop_start',
-      'epoch_start_1',
-      'epoch_end_1',
+      'epoch_start_0',
+      'epoch_end_0',
       'loop_end',
       'fit_end',
+      'teardown',
     ]
 
   def test_multiple_callbacks(self) -> None:
     calls: list[str] = []
 
     class A(Callback):
-      def on_fit_start(self, trainer: Any) -> None:
+      def on_fit_start(self, trainer: Any, module: Any) -> None:
         calls.append('A')
 
     class B(Callback):
-      def on_fit_start(self, trainer: Any) -> None:
+      def on_fit_start(self, trainer: Any, module: Any) -> None:
         calls.append('B')
 
-    mod = _StubModule()
+    mod = NoopEvalModule()
     trainer = Trainer(callbacks=[A(), B()])
     trainer.fit(mod, max_epochs=0)
     assert calls == ['A', 'B']
@@ -159,43 +177,43 @@ class TestLightningStyleHooks:
     events: list[str] = []
 
     class Track(Callback):
-      def on_train_epoch_start(self, trainer: Any, epoch: int) -> None:
+      def on_train_epoch_start(self, trainer: Any, module: Any, epoch: int) -> None:
         events.append(f'train_start_{epoch}')
 
-      def on_train_epoch_end(self, trainer: Any, epoch: int) -> None:
+      def on_train_epoch_end(self, trainer: Any, module: Any, epoch: int) -> None:
         events.append(f'train_end_{epoch}')
 
     trainer = Trainer(callbacks=[Track()])
-    trainer._dispatch('on_train_epoch_start', epoch=1)
-    trainer._dispatch('on_train_epoch_end', epoch=1)
-    assert events == ['train_start_1', 'train_end_1']
+    trainer.dispatch_callbacks('on_train_epoch_start', epoch=0)
+    trainer.dispatch_callbacks('on_train_epoch_end', epoch=0)
+    assert events == ['train_start_0', 'train_end_0']
 
   def test_validation_epoch_hooks(self) -> None:
     events: list[str] = []
 
     class Track(Callback):
-      def on_validation_epoch_start(self, trainer: Any, epoch: int) -> None:
+      def on_validation_epoch_start(self, trainer: Any, module: Any, epoch: int) -> None:
         events.append(f'val_start_{epoch}')
 
-      def on_validation_epoch_end(self, trainer: Any, epoch: int) -> None:
+      def on_validation_epoch_end(self, trainer: Any, module: Any, epoch: int) -> None:
         events.append(f'val_end_{epoch}')
 
     trainer = Trainer(callbacks=[Track()])
-    trainer._dispatch('on_validation_epoch_start', epoch=1)
-    trainer._dispatch('on_validation_epoch_end', epoch=1)
-    assert events == ['val_start_1', 'val_end_1']
+    trainer.dispatch_callbacks('on_validation_epoch_start', epoch=0)
+    trainer.dispatch_callbacks('on_validation_epoch_end', epoch=0)
+    assert events == ['val_start_0', 'val_end_0']
 
   def test_test_epoch_hooks(self) -> None:
     events: list[str] = []
 
     class Track(Callback):
-      def on_test_epoch_start(self, trainer: Any, epoch: int) -> None:
+      def on_test_epoch_start(self, trainer: Any, module: Any, epoch: int) -> None:
         events.append(f'test_start_{epoch}')
 
-      def on_test_epoch_end(self, trainer: Any, epoch: int) -> None:
+      def on_test_epoch_end(self, trainer: Any, module: Any, epoch: int) -> None:
         events.append(f'test_end_{epoch}')
 
     trainer = Trainer(callbacks=[Track()])
-    trainer._dispatch('on_test_epoch_start', epoch=1)
-    trainer._dispatch('on_test_epoch_end', epoch=1)
-    assert events == ['test_start_1', 'test_end_1']
+    trainer.dispatch_callbacks('on_test_epoch_start', epoch=0)
+    trainer.dispatch_callbacks('on_test_epoch_end', epoch=0)
+    assert events == ['test_start_0', 'test_end_0']

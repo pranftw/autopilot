@@ -24,6 +24,8 @@ cache/
 .uv/
 .mypy_cache/
 .pytest_cache/
+.coverage
+.autopilot/
 
 *.swp
 *.swo
@@ -33,3 +35,7 @@ cache/
 experiments/
 traces/
 reports/
+
+MagicMock/
+scripts/
+.cursor/dogfood
